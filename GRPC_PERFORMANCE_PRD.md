@@ -8,7 +8,7 @@ Date: 2026-10-11
 The original generated protobuf round trip was far behind Go and allocated
 heavily. A one-worker CPU comparison on a 1,866-byte generated `User` message
 measured about 10.2k round trips/s, 83 µs p50, 218 µs p99, 68.3 KB and 862
-Slang GC objects per operation. Most generated fields called fallible
+slang GC objects per operation. Most generated fields called fallible
 `result`-returning primitives even when decoding valid input, and nested map
 entries and messages created temporary writers and byte strings.
 
@@ -37,7 +37,7 @@ entries and messages created temporary writers and byte strings.
   unpacked lists, optional values, nested messages, and maps. It also checks
   generated size calculations against output bytes, including default-valued
   map entries.
-- All 15 Slang runtime tests pass normally and under
+- All 15 slang runtime tests pass normally and under
   `SLANG_GC_VERIFY_MINOR=1 SLANG_GC_NURSERY_KB=16`; the verifier reports
   `missed=0`. The generated consumer also passes minor-GC verification with
   `missed=0`.
@@ -53,10 +53,10 @@ entries and messages created temporary writers and byte strings.
 ## Current local comparison
 
 This is a CPU-only microbenchmark, not a gRPC server or HTTP/2/TLS benchmark.
-It uses the same generated fixture and one worker for Slang and Go. Three
+It uses the same generated fixture and one worker for slang and Go. Three
 interleaved ABBA rounds produced six samples per implementation. Throughput
-runs perform 20,000 Slang or 100,000 Go round trips; latency runs sample
-10,000 operations. The reported values are medians. Slang GC allocation
+runs perform 20,000 slang or 100,000 Go round trips; latency runs sample
+10,000 operations. The reported values are medians. slang GC allocation
 accounting and Go runtime allocation accounting are directional comparisons.
 
 | Implementation | Throughput | p50 | p99 | Allocated bytes/op | Objects/op |
