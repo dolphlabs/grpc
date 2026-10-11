@@ -1,0 +1,42 @@
+syntax = "proto3";
+package sample;
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  RED = 1;
+  GREEN = 2;
+}
+
+message Address {
+  string city = 1;
+}
+
+message User {
+  int32 id = 1;
+  sint64 score = 2;
+  string name = 3;
+  bytes avatar = 4;
+  bool active = 5;
+  float ratio = 6;
+  double balance = 7;
+  Color color = 8;
+  repeated uint32 nums = 9;
+  repeated int32 old_nums = 10 [packed = false];
+  Address address = 11;
+  optional string nickname = 12;
+  map<string, int32> labels = 13;
+  map<int64, Address> offices = 14;
+  uint32 unsigned_count = 15;
+  uint64 unsigned_total = 16;
+  sint32 signed_delta = 17;
+  fixed32 fixed_count = 18;
+  fixed64 fixed_total = 19;
+  sfixed32 signed_fixed = 20;
+  sfixed64 signed_fixed_total = 21;
+}
+
+message Empty {}
+
+service UserService {
+  rpc Get(User) returns (User);
+}
