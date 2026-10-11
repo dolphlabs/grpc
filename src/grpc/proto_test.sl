@@ -80,6 +80,77 @@ fn grpc_proto_test_rejects_bad_varints() -> str {
     return "";
 }
 
+fn grpc_proto_test_fast_primitives() -> str {
+    let limits = proto_default_limits();
+    let reader = proto_reader_fast(b"\x08\xac\x02", limits);
+    let tag = proto_reader_tag_fast(reader);
+    if proto_reader_fast_error(reader) != "" || tag.field_number != 1 ||
+       tag.wire_type != PROTO_VARINT { return "fast reader tag mismatch"; }
+    let value = proto_reader_varint_fast(reader);
+    if value != 300 || proto_reader_fast_error(reader) != "" {
+        return "fast reader varint mismatch";
+    }
+
+    let truncated = proto_reader_fast(b"\x80", limits);
+    let missing = proto_reader_tag_fast(truncated);
+    if missing.field_number != 0 || proto_reader_fast_error(truncated) == "" {
+        return "fast reader accepted truncated tag";
+    }
+
+    let value_limits_result = proto_new_limits(32, 4, 1);
+    guard let value_limits = value_limits_result else let e = err_of(value_limits_result) { return e; }
+    let over_budget = proto_reader_fast(b"\x08\x01\x10\x01", value_limits);
+    let first = proto_reader_tag_fast(over_budget);
+    if first.field_number != 1 { return "fast reader first tag missing"; }
+    proto_reader_varint_fast(over_budget);
+    proto_reader_tag_fast(over_budget);
+    if proto_reader_fast_error(over_budget) == "" {
+        return "fast reader ignored aggregate value limit";
+    }
+
+    let packed_limits_result = proto_new_limits(32, 4, 2);
+    guard let packed_limits = packed_limits_result else let e = err_of(packed_limits_result) { return e; }
+    let packed = proto_reader_fast(b"\x0a\x03\x01\x02\x03", packed_limits);
+    let packed_tag = proto_reader_tag_fast(packed);
+    if packed_tag.field_number != 1 { return "packed fast reader tag missing"; }
+    let parent_end = proto_reader_end_fast(packed);
+    proto_reader_packed_begin_fast(packed);
+    if proto_reader_fast_error(packed) != "" { return "packed fast reader length failed"; }
+    if proto_reader_varint_fast(packed) != 1 { return "packed fast reader first value mismatch"; }
+    proto_reader_varint_fast(packed);
+    if proto_reader_fast_error(packed) == "" {
+        return "packed fast reader ignored aggregate value limit";
+    }
+
+    let fixed_packed = proto_reader_fast(
+        b"\x0a\x08\x01\x00\x00\x00\x02\x00\x00\x00", packed_limits);
+    let fixed_tag = proto_reader_tag_fast(fixed_packed);
+    if fixed_tag.field_number != 1 { return "fixed packed fast reader tag missing"; }
+    proto_reader_packed_begin_fast(fixed_packed);
+    if proto_reader_fixed32_fast(fixed_packed) != 1 { return "fixed packed first value mismatch"; }
+    proto_reader_fixed32_fast(fixed_packed);
+    if proto_reader_fast_error(fixed_packed) == "" {
+        return "fixed packed fast reader ignored aggregate value limit";
+    }
+    if parent_end <= 0 { return "packed fast reader parent bound missing"; }
+
+    let small_limits_result = proto_new_limits(1, 4, 4);
+    guard let small_limits = small_limits_result else let e = err_of(small_limits_result) { return e; }
+    let writer = proto_writer_fast(small_limits);
+    proto_writer_bytes_fast(writer, b"ab");
+    let first_error = proto_writer_fast_error(writer);
+    if first_error == "" { return "fast writer ignored byte limit"; }
+    proto_writer_varint_fast(writer, 0);
+    if proto_writer_fast_error(writer) != first_error {
+        return "fast writer replaced its first error";
+    }
+    proto_writer_fast_context(writer, "Test.field");
+    if proto_writer_fast_error(writer) != "Test.field: " + first_error {
+        return "fast writer context lost the original error";
+    }
+    return "";
+}
+
 fn grpc_proto_test_bounds_and_submessages() -> str {
     let limits_result = proto_new_limits(32, 1, 2);
     guard let limits = limits_result else let e = err_of(limits_result) { return e; }
@@ -151,6 +222,53 @@ fn test_grpc_proto_tags_and_skip() {
 fn test_grpc_proto_rejects_bad_varints() {
     let e = grpc_proto_test_rejects_bad_varints();
     if e != "" { panic(e); }
+}
+
+fn test_grpc_proto_fast_primitives() {
+    let e = grpc_proto_test_fast_primitives();
+    if e != "" { panic(e); }
+}
+
+fn test_grpc_proto_fast_submessage_frame() {
+    let limits_result = proto_new_limits(32, 3, 8);
+    guard let limits = limits_result else let e = err_of(limits_result) { panic(e); }
+    let reader = proto_reader_fast(b"\x0a\x02\x08\x01\x10\x02", limits);
+    let outer_tag = proto_reader_tag_fast(reader);
+    if outer_tag.field_number != 1 || outer_tag.wire_type != PROTO_BYTES {
+        panic("fast submessage outer tag mismatch");
+    }
+    let frame = proto_reader_submessage_begin_fast(reader);
+    if proto_reader_fast_error(reader) != "" { panic("fast submessage enter failed"); }
+    let child_tag = proto_reader_tag_fast(reader);
+    if child_tag.field_number != 1 || child_tag.wire_type != PROTO_VARINT {
+        panic("fast submessage child tag mismatch");
+    }
+    if proto_reader_varint_fast(reader) != 1 || !proto_reader_fast_done(reader) {
+        panic("fast submessage child decode mismatch");
+    }
+    proto_reader_submessage_end_fast(reader, frame);
+    if proto_reader_fast_error(reader) != "" { panic("fast submessage restore failed"); }
+    let next_tag = proto_reader_tag_fast(reader);
+    if next_tag.field_number != 2 || next_tag.wire_type != PROTO_VARINT ||
+       proto_reader_varint_fast(reader) != 2 || !proto_reader_fast_done(reader) {
+        panic("fast submessage parent boundary was not restored");
+    }
+
+    let shallow_result = proto_new_limits(32, 1, 8);
+    guard let shallow = shallow_result else let e = err_of(shallow_result) { panic(e); }
+    let nested = proto_reader_fast(b"\x0a\x02\x0a\x00", shallow);
+    proto_reader_tag_fast(nested);
+    let nested_frame = proto_reader_submessage_begin_fast(nested);
+    proto_reader_tag_fast(nested);
+    proto_reader_submessage_begin_fast(nested);
+    if proto_reader_fast_error(nested) == "" {
+        panic("fast submessage ignored configured nesting limit");
+    }
+    proto_reader_fast_context(nested, "Test.child");
+    if proto_reader_fast_error(nested) == "" {
+        panic("fast submessage context lost the original error");
+    }
+    proto_reader_submessage_end_fast(nested, nested_frame);
 }
 
 fn test_grpc_proto_bounds_and_submessages() {

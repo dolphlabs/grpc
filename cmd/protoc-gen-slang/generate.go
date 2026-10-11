@@ -299,9 +299,9 @@ func emitMessage(b *strings.Builder, m *messageDesc, reg *registry) error {
 }
 
 func emitDecoder(b *strings.Builder, m *messageDesc, fields []*fieldDesc, reg *registry) error {
-	fmt.Fprintf(b, "fn decode_%s_reader(reader: grpc.Reader) -> result[%s, str] {\n", m.slangName, m.slangName)
+	fmt.Fprintf(b, "fn decode_%s_reader(reader: grpc.FastReader) -> %s {\n", m.slangName, m.slangName)
 	fmt.Fprintf(b, "    let out = new_%s();\n", m.slangName)
-	b.WriteString("    while true {\n        let tag_result = grpc.proto_reader_tag(reader);\n        guard let tag_opt = tag_result else let e = err_of(tag_result) { return err(\"protobuf tag: \" + e); }\n        guard let tag = tag_opt else { break; }\n        switch tag.field_number {\n")
+	b.WriteString("    while true {\n        let tag = grpc.proto_reader_tag_fast(reader);\n        if tag.field_number == 0 { break; }\n        switch tag.field_number {\n")
 	for _, f := range fields {
 		fmt.Fprintf(b, "          case %d {\n", f.number)
 		if err := emitDecodeField(b, m, f, reg, "            "); err != nil {
@@ -309,11 +309,13 @@ func emitDecoder(b *strings.Builder, m *messageDesc, fields []*fieldDesc, reg *r
 		}
 		b.WriteString("          }\n")
 	}
-	b.WriteString("          default {\n            let skipped = grpc.proto_reader_skip(reader, tag.wire_type);\n            guard let _skip = skipped else let e = err_of(skipped) { return err(\"unknown protobuf field: \" + e); }\n          }\n        }\n    }\n")
-	b.WriteString("    if !grpc.proto_reader_done(reader) { return err(\"protobuf submessage was not fully consumed\"); }\n")
-	fmt.Fprintf(b, "    return ok(out);\n}\n\npub fn decode_%s(raw: bytes, limits: grpc.Limits) -> result[%s, str] {\n", m.slangName, m.slangName)
-	b.WriteString("    let reader_result = grpc.proto_reader(raw, limits);\n    guard let reader = reader_result else let e = err_of(reader_result) { return err(e); }\n")
-	fmt.Fprintf(b, "    return decode_%s_reader(reader);\n}\n\n", m.slangName)
+	b.WriteString("          default {\n            grpc.proto_reader_skip_fast(reader, tag.wire_type);\n          }\n        }\n    }\n")
+	fmt.Fprintf(b, "    let reader_error = grpc.proto_reader_fast_error(reader);\n    if reader_error != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", m.slangName)
+	b.WriteString("    if !grpc.proto_reader_fast_done(reader) { grpc.proto_reader_fast_fail(reader, \"protobuf submessage was not fully consumed\"); return out; }\n")
+	fmt.Fprintf(b, "    return out;\n}\n\npub fn decode_%s(raw: bytes, limits: grpc.Limits) -> result[%s, str] {\n", m.slangName, m.slangName)
+	b.WriteString("    let reader = grpc.proto_reader_fast(raw, limits);\n    let reader_error = grpc.proto_reader_fast_error(reader);\n    if reader_error != \"\" { return err(reader_error); }\n")
+	fmt.Fprintf(b, "    let out = decode_%s_reader(reader);\n", m.slangName)
+	b.WriteString("    let final_error = grpc.proto_reader_fast_error(reader);\n    if final_error != \"\" { return err(final_error); }\n    if !grpc.proto_reader_fast_done(reader) { return err(\"protobuf message was not fully consumed\"); }\n    return ok(out);\n}\n\n")
 	return nil
 }
 
@@ -323,22 +325,26 @@ func emitDecodeField(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *
 		return emitDecodeMap(b, owner, f, reg, indent)
 	}
 	if f.label == labelRepeated && isPackable(f.kind) {
+		packedParentEnd := fmt.Sprintf("packed_parent_end_%d", f.number)
+		packedError := fmt.Sprintf("packed_error_%d", f.number)
+		packedEndError := fmt.Sprintf("packed_end_error_%d", f.number)
 		fmt.Fprintf(b, "%sif tag.wire_type == grpc.PROTO_BYTES {\n", indent)
-		fmt.Fprintf(b, "%s    let packed_result = grpc.proto_reader_packed(reader);\n%s    guard let packed = packed_result else let e = err_of(packed_result) { return err(\"%s.%s: \" + e); }\n", indent, indent, owner.slangName, name)
-		fmt.Fprintf(b, "%s    while !grpc.proto_reader_done(packed) {\n", indent)
-		fmt.Fprintf(b, "%s        let charged = grpc.proto_reader_charge(packed);\n%s        guard let _charged = charged else let e = err_of(charged) { return err(\"%s.%s: \" + e); }\n", indent, indent, owner.slangName, name)
-		if err := emitReadValue(b, owner.slangName+"."+name, f, reg, "packed", indent+"        ", "packed_value"); err != nil {
+		fmt.Fprintf(b, "%s    let %s = grpc.proto_reader_end_fast(reader);\n", indent, packedParentEnd)
+		fmt.Fprintf(b, "%s    grpc.proto_reader_packed_begin_fast(reader);\n%s    let %s = grpc.proto_reader_fast_error(reader);\n%s    if %s != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, indent, packedError, indent, packedError, owner.slangName+"."+name)
+		fmt.Fprintf(b, "%s    while !grpc.proto_reader_fast_done(reader) {\n", indent)
+		if err := emitReadValue(b, owner.slangName+"."+name, f, reg, "reader", indent+"        ", "packed_value"); err != nil {
 			return err
 		}
-		fmt.Fprintf(b, "%s        push(out.%s, packed_value);\n%s    }\n%s} else {\n", indent, name, indent, indent)
-		fmt.Fprintf(b, "%s    if tag.wire_type != %s { return err(\"%s.%s: wrong protobuf wire type\"); }\n", indent, wireConstant(f.kind), owner.slangName, name)
+		fmt.Fprintf(b, "%s        push(out.%s, packed_value);\n%s    }\n%s    grpc.proto_reader_packed_end_fast(reader, %s);\n%s    let %s = grpc.proto_reader_fast_error(reader);\n%s    if %s != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n%s} else {\n", indent, name, indent, indent, packedParentEnd, indent, packedEndError, indent, packedEndError, owner.slangName+"."+name, indent)
+		fmt.Fprintf(b, "%s    if tag.wire_type != %s { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, wireConstant(f.kind), owner.slangName+"."+name+": wrong protobuf wire type")
 		if err := emitReadValue(b, owner.slangName+"."+name, f, reg, "reader", indent+"    ", "field_value"); err != nil {
 			return err
 		}
 		fmt.Fprintf(b, "%s    push(out.%s, field_value);\n%s}\n", indent, name, indent)
+		fmt.Fprintf(b, "%slet field_error_%d = grpc.proto_reader_fast_error(reader);\n%sif field_error_%d != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, f.number, indent, f.number, owner.slangName+"."+name)
 		return nil
 	}
-	fmt.Fprintf(b, "%sif tag.wire_type != %s { return err(\"%s.%s: wrong protobuf wire type\"); }\n", indent, wireConstant(f.kind), owner.slangName, name)
+	fmt.Fprintf(b, "%sif tag.wire_type != %s { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, wireConstant(f.kind), owner.slangName+"."+name+": wrong protobuf wire type")
 	if err := emitReadValue(b, owner.slangName+"."+name, f, reg, "reader", indent, "field_value"); err != nil {
 		return err
 	}
@@ -349,6 +355,7 @@ func emitDecodeField(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *
 	} else {
 		fmt.Fprintf(b, "%sout.%s = field_value;\n", indent, name)
 	}
+	fmt.Fprintf(b, "%slet field_error_%d = grpc.proto_reader_fast_error(reader);\n%sif field_error_%d != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, f.number, indent, f.number, owner.slangName+"."+name)
 	return nil
 }
 
@@ -360,19 +367,19 @@ func emitReadValue(b *strings.Builder, label string, f *fieldDesc, reg *registry
 	}
 	switch kind {
 	case typeInt32, typeInt64, typeUint32, typeUint64, typeSint32, typeSint64, typeBool, typeEnum:
-		fmt.Fprintf(b, "%slet %s_result = grpc.proto_reader_varint(%s);\n%sguard let %s_raw = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, reader, indent, id, id, id, label)
+		fmt.Fprintf(b, "%slet %s_raw = grpc.proto_reader_varint_fast(%s);\n", indent, id, reader)
 		expr := ""
 		switch kind {
 		case typeInt32, typeEnum:
-			fmt.Fprintf(b, "%sif !grpc.proto_int32_wire_valid(%s_raw) { return err(\"%s: int32 varint is outside the valid wire range\"); }\n", indent, id, label)
+			fmt.Fprintf(b, "%sif !grpc.proto_int32_wire_valid(%s_raw) { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, id, label+": int32 varint is outside the valid wire range")
 			expr = fmt.Sprintf("grpc.proto_int32_from_wire(%s_raw)", id)
 		case typeInt64:
 			expr = id + "_raw as int"
 		case typeUint32:
-			fmt.Fprintf(b, "%sif %s_raw > 4294967295 { return err(\"%s: uint32 value exceeds 4294967295\"); }\n", indent, id, label)
+			fmt.Fprintf(b, "%sif %s_raw > 4294967295 { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, id, label+": uint32 value exceeds 4294967295")
 			expr = id + "_raw as u32"
 		case typeSint32:
-			fmt.Fprintf(b, "%sif %s_raw > 4294967295 { return err(\"%s: sint32 value exceeds 4294967295\"); }\n", indent, id, label)
+			fmt.Fprintf(b, "%sif %s_raw > 4294967295 { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, id, label+": sint32 value exceeds 4294967295")
 			expr = fmt.Sprintf("grpc.proto_sint32_from_wire(%s_raw)", id)
 		case typeUint64:
 			expr = id + "_raw"
@@ -387,7 +394,7 @@ func emitReadValue(b *strings.Builder, label string, f *fieldDesc, reg *registry
 		if kind == typeFloat {
 			fn = "proto_reader_float"
 		}
-		fmt.Fprintf(b, "%slet %s_result = grpc.%s(%s);\n%sguard let %s_raw = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, fn, reader, indent, id, id, id, label)
+		fmt.Fprintf(b, "%slet %s_raw = grpc.%s_fast(%s);\n", indent, id, fn, reader)
 		expr := id + "_raw"
 		if kind == typeSfixed32 {
 			expr = "(" + id + "_raw as i32) as int"
@@ -398,23 +405,24 @@ func emitReadValue(b *strings.Builder, label string, f *fieldDesc, reg *registry
 		if kind == typeDouble {
 			fn = "proto_reader_double"
 		}
-		fmt.Fprintf(b, "%slet %s_result = grpc.%s(%s);\n%sguard let %s_raw = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, fn, reader, indent, id, id, id, label)
+		fmt.Fprintf(b, "%slet %s_raw = grpc.%s_fast(%s);\n", indent, id, fn, reader)
 		expr := id + "_raw"
 		if kind == typeSfixed64 {
 			expr = id + "_raw as int"
 		}
 		fmt.Fprintf(b, "%slet %s: %s = %s;\n", indent, target, slangBaseTypeForKind(kind, f, reg), expr)
 	case typeString:
-		fmt.Fprintf(b, "%slet %s_result = grpc.proto_reader_string(%s);\n%sguard let %s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, reader, indent, target, id, id, label)
+		fmt.Fprintf(b, "%slet %s = grpc.proto_reader_string_fast(%s);\n", indent, target, reader)
 	case typeBytes:
-		fmt.Fprintf(b, "%slet %s_result = grpc.proto_reader_bytes(%s);\n%sguard let %s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, reader, indent, target, id, id, label)
+		fmt.Fprintf(b, "%slet %s = grpc.proto_reader_bytes_fast(%s);\n", indent, target, reader)
 	case typeMessage:
 		msg := reg.messages[typeName(f)]
 		if msg == nil || msg.mapEntry {
 			return fmt.Errorf("%s: missing generated message descriptor %s", label, typeName(f))
 		}
-		fmt.Fprintf(b, "%slet %s_sub_result = grpc.proto_reader_submessage(%s);\n%sguard let %s_sub = %s_sub_result else let e = err_of(%s_sub_result) { return err(\"%s: \" + e); }\n", indent, id, reader, indent, id, id, id, label)
-		fmt.Fprintf(b, "%slet %s_result = decode_%s_reader(%s_sub);\n%sguard let %s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, msg.slangName, id, indent, target, id, id, label)
+		frame := id + "_frame"
+		fmt.Fprintf(b, "%slet %s = grpc.proto_reader_submessage_begin_fast(%s);\n%sif grpc.proto_reader_fast_error(reader) != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, frame, reader, indent, label)
+		fmt.Fprintf(b, "%slet %s = decode_%s_reader(reader);\n%sif grpc.proto_reader_fast_error(reader) != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n%sgrpc.proto_reader_submessage_end_fast(reader, %s);\n%sif grpc.proto_reader_fast_error(reader) != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, target, msg.slangName, indent, label, indent, frame, indent, label)
 	default:
 		return fmt.Errorf("%s: unsupported protobuf field type %d", label, kind)
 	}
@@ -424,8 +432,8 @@ func emitReadValue(b *strings.Builder, label string, f *fieldDesc, reg *registry
 func emitDecodeMap(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *registry, indent string) error {
 	name := safeIdentifier(f.name)
 	id := fmt.Sprintf("map_%d", f.number)
-	fmt.Fprintf(b, "%sif tag.wire_type != grpc.PROTO_BYTES { return err(\"%s.%s: wrong protobuf wire type\"); }\n", indent, owner.slangName, name)
-	fmt.Fprintf(b, "%slet %s_result = grpc.proto_reader_submessage(reader);\n%sguard let %s_reader = %s_result else let e = err_of(%s_result) { return err(\"%s.%s: \" + e); }\n", indent, id, indent, id, id, id, owner.slangName, name)
+	fmt.Fprintf(b, "%sif tag.wire_type != grpc.PROTO_BYTES { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, owner.slangName+"."+name+": wrong protobuf wire type")
+	fmt.Fprintf(b, "%slet %s_frame = grpc.proto_reader_submessage_begin_fast(reader);\n%sif grpc.proto_reader_fast_error(reader) != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, id, indent, owner.slangName+"."+name)
 	keyType, err := slangBaseType(f.mapKey, reg)
 	if err != nil {
 		return err
@@ -435,7 +443,7 @@ func emitDecodeMap(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *re
 		return err
 	}
 	fmt.Fprintf(b, "%slet %s_key: %s = %s;\n%slet %s_value: %s = %s;\n", indent, id, keyType, defaultBaseExpr(f.mapKey, reg), indent, id, valueType, defaultBaseExpr(f.mapValue, reg))
-	fmt.Fprintf(b, "%swhile true {\n%s    let %s_tag_result = grpc.proto_reader_tag(%s_reader);\n%s    guard let %s_tag_opt = %s_tag_result else let e = err_of(%s_tag_result) { return err(\"%s.%s map entry: \" + e); }\n%s    guard let %s_tag = %s_tag_opt else { break; }\n%s    switch %s_tag.field_number {\n", indent, indent, id, id, indent, id, id, id, owner.slangName, name, indent, id, id, indent, id)
+	fmt.Fprintf(b, "%swhile !grpc.proto_reader_fast_done(reader) {\n%s    let %s_tag = grpc.proto_reader_tag_fast(reader);\n%s    if %s_tag.field_number == 0 { break; }\n%s    switch %s_tag.field_number {\n", indent, indent, id, indent, id, indent, id)
 	for _, part := range []*fieldDesc{f.mapKey, f.mapValue} {
 		n := part.number
 		target := id + "_key"
@@ -444,26 +452,167 @@ func emitDecodeMap(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *re
 		}
 		label := owner.slangName + "." + name + " map entry"
 		fmt.Fprintf(b, "%s      case %d {\n", indent, n)
-		fmt.Fprintf(b, "%s        if %s_tag.wire_type != %s { return err(\"%s: wrong map entry wire type\"); }\n", indent, id, wireConstant(part.kind), label)
-		if err := emitReadValue(b, label, part, reg, id+"_reader", indent+"        ", target+"_read"); err != nil {
+		fmt.Fprintf(b, "%s        if %s_tag.wire_type != %s { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, id, wireConstant(part.kind), label+": wrong map entry wire type")
+		if err := emitReadValue(b, label, part, reg, "reader", indent+"        ", target+"_read"); err != nil {
 			return err
 		}
 		fmt.Fprintf(b, "%s        %s = %s;\n%s      }\n", indent, target, target+"_read", indent)
 	}
-	fmt.Fprintf(b, "%s      default {\n%s        let %s_skip = grpc.proto_reader_skip(%s_reader, %s_tag.wire_type);\n%s        guard let _%s_skip = %s_skip else let e = err_of(%s_skip) { return err(\"%s.%s map entry: \" + e); }\n%s      }\n%s    }\n%s}\n%sout.%s[%s_key] = %s_value;\n", indent, indent, id, id, id, indent, id, id, id, owner.slangName, name, indent, indent, indent, indent, name, id, id)
+	fmt.Fprintf(b, "%s      default {\n%s        grpc.proto_reader_skip_fast(reader, %s_tag.wire_type);\n%s      }\n%s    }\n%s}\n", indent, indent, id, indent, indent, indent)
+	fmt.Fprintf(b, "%slet %s_error = grpc.proto_reader_fast_error(reader);\n%sif %s_error != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n", indent, id, indent, id, owner.slangName+"."+name+" map entry")
+	fmt.Fprintf(b, "%sif !grpc.proto_reader_fast_done(reader) { grpc.proto_reader_fast_fail(reader, %q); return out; }\n", indent, owner.slangName+"."+name+" map entry was not fully consumed")
+	fmt.Fprintf(b, "%sgrpc.proto_reader_submessage_end_fast(reader, %s_frame);\n%sif grpc.proto_reader_fast_error(reader) != \"\" { grpc.proto_reader_fast_context(reader, %q); return out; }\n%sout.%s[%s_key] = %s_value;\n", indent, id, indent, owner.slangName+"."+name, indent, name, id, id)
 	return nil
 }
 
 func emitEncoder(b *strings.Builder, m *messageDesc, fields []*fieldDesc, reg *registry) error {
-	fmt.Fprintf(b, "pub fn encode_%s(value: %s, limits: grpc.Limits) -> result[bytes, str] {\n", m.slangName, m.slangName)
-	b.WriteString("    let writer_result = grpc.proto_writer(limits);\n    guard let writer = writer_result else let e = err_of(writer_result) { return err(e); }\n")
+	if err := emitEncodedSize(b, m, fields, reg); err != nil {
+		return err
+	}
+	fmt.Fprintf(b, "fn encode_%s_fields(writer: grpc.Writer, value: %s, limits: grpc.Limits) {\n", m.slangName, m.slangName)
 	for _, f := range fields {
 		if err := emitEncodeField(b, m, f, reg); err != nil {
 			return err
 		}
+		fmt.Fprintf(b, "    let field_error_%d = grpc.proto_writer_fast_error(writer);\n    if field_error_%d != \"\" { grpc.proto_writer_fast_context(writer, %q); return; }\n", f.number, f.number, m.slangName+"."+safeIdentifier(f.name))
 	}
-	b.WriteString("    return ok(grpc.proto_writer_finish(writer));\n}\n\n")
+	b.WriteString("}\n\n")
+	fmt.Fprintf(b, "pub fn encode_%s(value: %s, limits: grpc.Limits) -> result[bytes, str] {\n", m.slangName, m.slangName)
+	b.WriteString("    let writer = grpc.proto_writer_fast(limits);\n    let initial_error = grpc.proto_writer_fast_error(writer);\n    if initial_error != \"\" { return err(initial_error); }\n")
+	fmt.Fprintf(b, "    encode_%s_fields(writer, value, limits);\n", m.slangName)
+	b.WriteString("    let final_writer_error = grpc.proto_writer_fast_error(writer);\n    if final_writer_error != \"\" { return err(final_writer_error); }\n    return ok(grpc.proto_writer_finish_fast(writer));\n}\n\n")
 	return nil
+}
+
+func emitEncodedSize(b *strings.Builder, m *messageDesc, fields []*fieldDesc, reg *registry) error {
+	fmt.Fprintf(b, "fn encoded_size_%s(value: %s, limits: grpc.Limits) -> int {\n    let size = 0;\n", m.slangName, m.slangName)
+	for _, f := range fields {
+		if err := emitSizeField(b, m, f, reg); err != nil {
+			return err
+		}
+	}
+	b.WriteString("    return size;\n}\n\n")
+	return nil
+}
+
+func emitSizeField(b *strings.Builder, m *messageDesc, f *fieldDesc, reg *registry) error {
+	name := safeIdentifier(f.name)
+	if f.mapKey != nil {
+		key, value := f.mapKey, f.mapValue
+		keyName, valueName := fmt.Sprintf("size_map_key_%d", f.number), fmt.Sprintf("size_map_value_%d", f.number)
+		entry := fmt.Sprintf("size_map_entry_%d", f.number)
+		fmt.Fprintf(b, "    for %s, %s in value.%s {\n        let %s = 0;\n", keyName, valueName, name, entry)
+		fmt.Fprintf(b, "        if %s != %s {\n", keyName, zeroExpr(key.kind))
+		if err := emitSizeAdd(b, entry, sizeFieldExpr(1, expectedWire(key.kind), key, keyName, reg), "            "); err != nil {
+			return err
+		}
+		b.WriteString("        }\n")
+		if value.kind == typeMessage {
+			if err := emitSizeAdd(b, entry, sizeFieldExpr(2, expectedWire(value.kind), value, valueName, reg), "        "); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(b, "        if %s != %s {\n", valueName, zeroExpr(value.kind))
+			if err := emitSizeAdd(b, entry, sizeFieldExpr(2, expectedWire(value.kind), value, valueName, reg), "            "); err != nil {
+				return err
+			}
+			b.WriteString("        }\n")
+		}
+		outer := fmt.Sprintf("grpc.proto_size_add_fast(grpc.proto_varint_size_fast(((%d as u64) << 3) | 2), grpc.proto_length_delimited_size_fast(%s), limits)", f.number, entry)
+		if err := emitSizeAdd(b, "size", outer, "        "); err != nil {
+			return err
+		}
+		b.WriteString("    }\n")
+		return nil
+	}
+	if f.label == labelRepeated && isPackable(f.kind) && packedByDefault(f) {
+		packed := fmt.Sprintf("size_packed_%d", f.number)
+		fmt.Fprintf(b, "    if len(value.%s) > 0 {\n        let %s = 0;\n        for item in value.%s {\n", name, packed, name)
+		if err := emitSizeAdd(b, packed, wireValueSizeExpr(f, "item", reg), "            "); err != nil {
+			return err
+		}
+		b.WriteString("        }\n")
+		outer := fmt.Sprintf("grpc.proto_size_add_fast(grpc.proto_varint_size_fast(((%d as u64) << 3) | 2), grpc.proto_length_delimited_size_fast(%s), limits)", f.number, packed)
+		if err := emitSizeAdd(b, "size", outer, "        "); err != nil {
+			return err
+		}
+		b.WriteString("    }\n")
+		return nil
+	}
+	if f.label == labelRepeated {
+		fmt.Fprintf(b, "    for item in value.%s {\n", name)
+		if err := emitSizeAdd(b, "size", sizeFieldExpr(f.number, expectedWire(f.kind), f, "item", reg), "        "); err != nil {
+			return err
+		}
+		b.WriteString("    }\n")
+		return nil
+	}
+	if isOptional(f) {
+		fmt.Fprintf(b, "    if let item = value.%s {\n", name)
+		if err := emitSizeAdd(b, "size", sizeFieldExpr(f.number, expectedWire(f.kind), f, "item", reg), "        "); err != nil {
+			return err
+		}
+		b.WriteString("    }\n")
+		return nil
+	}
+	fmt.Fprintf(b, "    if value.%s != %s {\n", name, zeroExpr(f.kind))
+	if err := emitSizeAdd(b, "size", sizeFieldExpr(f.number, expectedWire(f.kind), f, "value."+name, reg), "        "); err != nil {
+		return err
+	}
+	b.WriteString("    }\n")
+	return nil
+}
+
+func emitSizeAdd(b *strings.Builder, target, amount, indent string) error {
+	fmt.Fprintf(b, "%s%s = grpc.proto_size_add_fast(%s, %s, limits);\n%sif %s < 0 { return -1; }\n", indent, target, target, amount, indent, target)
+	return nil
+}
+
+func emitWriterSizeAdd(b *strings.Builder, target, amount, indent, message string) error {
+	fmt.Fprintf(b, "%s%s = grpc.proto_size_add_fast(%s, %s, limits);\n%sif %s < 0 { grpc.proto_writer_fast_fail(writer, %q); return; }\n", indent, target, target, amount, indent, target, message)
+	return nil
+}
+
+func sizeFieldExpr(field, wire int, f *fieldDesc, value string, reg *registry) string {
+	tag := fmt.Sprintf("grpc.proto_varint_size_fast(((%d as u64) << 3) | %d)", field, wire)
+	return fmt.Sprintf("grpc.proto_size_add_fast(%s, %s, limits)", tag, wireValueSizeExpr(f, value, reg))
+}
+
+func wireValueSizeExpr(f *fieldDesc, value string, reg *registry) string {
+	kind := f.kind
+	if f.mapValue != nil {
+		kind = f.mapValue.kind
+	}
+	switch kind {
+	case typeInt32, typeEnum:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(grpc.proto_int32_to_wire(%s))", value)
+	case typeInt64:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(%s as u64)", value)
+	case typeUint32:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(%s as u64)", value)
+	case typeUint64:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(%s)", value)
+	case typeSint32:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(grpc.proto_sint32_to_wire(%s))", value)
+	case typeSint64:
+		return fmt.Sprintf("grpc.proto_varint_size_fast(grpc.proto_sint64_to_wire(%s))", value)
+	case typeBool:
+		return "1"
+	case typeFixed32, typeSfixed32, typeFloat:
+		return "4"
+	case typeFixed64, typeSfixed64, typeDouble:
+		return "8"
+	case typeString, typeBytes:
+		return fmt.Sprintf("grpc.proto_length_delimited_size_fast(len(%s))", value)
+	case typeMessage:
+		msg := reg.messages[typeName(f)]
+		if msg == nil {
+			return "-1"
+		}
+		return fmt.Sprintf("grpc.proto_length_delimited_size_fast(encoded_size_%s(%s, limits))", msg.slangName, value)
+	default:
+		return "-1"
+	}
 }
 
 func emitEncodeField(b *strings.Builder, m *messageDesc, f *fieldDesc, reg *registry) error {
@@ -473,11 +622,11 @@ func emitEncodeField(b *strings.Builder, m *messageDesc, f *fieldDesc, reg *regi
 	}
 	if f.label == labelRepeated {
 		if isPackable(f.kind) && packedByDefault(f) {
-			fmt.Fprintf(b, "    if len(value.%s) > 0 {\n        let packed_result = grpc.proto_writer(limits);\n        guard let packed = packed_result else let e = err_of(packed_result) { return err(e); }\n        for item in value.%s {\n", name, name)
+			fmt.Fprintf(b, "    if len(value.%s) > 0 {\n        let packed = grpc.proto_writer_fast(limits);\n        let packed_error = grpc.proto_writer_fast_error(packed);\n        if packed_error != \"\" { grpc.proto_writer_fast_fail(writer, packed_error); return; }\n        for item in value.%s {\n", name, name)
 			if err := emitWriteValue(b, m.slangName+"."+name, f, "packed", "item", 12, reg); err != nil {
 				return err
 			}
-			fmt.Fprintf(b, "        }\n        let packed_bytes = grpc.proto_writer_finish(packed);\n")
+			fmt.Fprintf(b, "        }\n        let packed_final_error = grpc.proto_writer_fast_error(packed);\n        if packed_final_error != \"\" { grpc.proto_writer_fast_fail(writer, %q + packed_final_error); return; }\n        let packed_bytes = grpc.proto_writer_finish_fast(packed);\n", m.slangName+"."+name+": ")
 			if err := emitWriteTag(b, m.slangName+"."+name, f.number, 2, 8); err != nil {
 				return err
 			}
@@ -525,7 +674,7 @@ func emitWriteTag(b *strings.Builder, label string, field, wire, spaces int) err
 
 func emitWriteTagTo(b *strings.Builder, label, writer, id string, field, wire, spaces int) error {
 	indent := strings.Repeat(" ", spaces)
-	fmt.Fprintf(b, "%slet %s_result = grpc.proto_writer_tag(%s, %d, %s);\n%sguard let _%s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, writer, field, wireConstValue(wire), indent, id, id, id, label)
+	fmt.Fprintf(b, "%sgrpc.proto_writer_tag_fast(%s, %d, %s);\n", indent, writer, field, wireConstValue(wire))
 	return nil
 }
 
@@ -535,7 +684,7 @@ func emitWriteBytes(b *strings.Builder, label, writer, value string, spaces int)
 
 func emitWriteBytesTo(b *strings.Builder, label, writer, value, id string, spaces int) error {
 	indent := strings.Repeat(" ", spaces)
-	fmt.Fprintf(b, "%slet %s_result = grpc.proto_writer_bytes(%s, %s);\n%sguard let _%s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, writer, value, indent, id, id, id, label)
+	fmt.Fprintf(b, "%sgrpc.proto_writer_bytes_fast(%s, %s);\n", indent, writer, value)
 	return nil
 }
 
@@ -547,7 +696,7 @@ func emitWriteValue(b *strings.Builder, label string, f *fieldDesc, writer, valu
 		kind = f.mapValue.kind
 	}
 	if kind == typeInt32 || kind == typeSint32 || kind == typeSfixed32 || kind == typeEnum {
-		fmt.Fprintf(b, "%sif %s < -2147483648 || %s > 2147483647 { return err(\"%s: value is outside int32 range\"); }\n", indent, value, value, label)
+		fmt.Fprintf(b, "%sif %s < -2147483648 || %s > 2147483647 { grpc.proto_writer_fast_fail(%s, %q); return; }\n", indent, value, value, writer, label+": value is outside int32 range")
 	}
 	fn := ""
 	arg := value
@@ -589,13 +738,14 @@ func emitWriteValue(b *strings.Builder, label string, f *fieldDesc, writer, valu
 		if msg == nil {
 			return fmt.Errorf("%s: message descriptor missing", label)
 		}
-		encode := id + "_message"
-		fmt.Fprintf(b, "%slet %s_result = encode_%s(%s, limits);\n%sguard let %s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, encode, msg.slangName, value, indent, encode, encode, encode, label)
-		fn, arg = "proto_writer_bytes", encode
+		size := id + "_size"
+		fmt.Fprintf(b, "%slet %s = encoded_size_%s(%s, limits);\n%sif %s < 0 { grpc.proto_writer_fast_fail(%s, %q); return; }\n", indent, size, msg.slangName, value, indent, size, writer, label+": nested message exceeds configured byte limit")
+		fmt.Fprintf(b, "%sgrpc.proto_writer_varint_fast(%s, %s as u64);\n%sencode_%s_fields(%s, %s, limits);\n", indent, writer, size, indent, msg.slangName, writer, value)
+		return nil
 	default:
 		return fmt.Errorf("%s: unsupported protobuf writer field kind %d", label, kind)
 	}
-	fmt.Fprintf(b, "%slet %s_result = grpc.%s(%s, %s);\n%sguard let _%s = %s_result else let e = err_of(%s_result) { return err(\"%s: \" + e); }\n", indent, id, fn, writer, arg, indent, id, id, id, label)
+	fmt.Fprintf(b, "%sgrpc.%s_fast(%s, %s);\n", indent, fn, writer, arg)
 	return nil
 }
 
@@ -603,45 +753,60 @@ func emitEncodeMap(b *strings.Builder, owner *messageDesc, f *fieldDesc, reg *re
 	name := safeIdentifier(f.name)
 	key := f.mapKey
 	value := f.mapValue
-	keyName, valueName := "map_key", "map_value"
-	entryID := fmt.Sprintf("map_entry_%d", f.number)
+	keyName, valueName := fmt.Sprintf("map_key_%d", f.number), fmt.Sprintf("map_value_%d", f.number)
+	entryID := fmt.Sprintf("map_entry_size_%d", f.number)
 	fmt.Fprintf(b, "    for %s, %s in value.%s {\n", keyName, valueName, name)
-	fmt.Fprintf(b, "        let %s_result = grpc.proto_writer(limits);\n        guard let %s = %s_result else let e = err_of(%s_result) { return err(e); }\n", entryID, entryID, entryID, entryID)
+	fmt.Fprintf(b, "        let %s = 0;\n", entryID)
 	zero := zeroExpr(key.kind)
-	if key.kind == typeString || key.kind == typeBytes || key.kind == typeBool || key.kind == typeFloat || key.kind == typeDouble || key.kind == typeInt32 || key.kind == typeInt64 || key.kind == typeUint32 || key.kind == typeUint64 || key.kind == typeSint32 || key.kind == typeSint64 || key.kind == typeSfixed32 || key.kind == typeSfixed64 || key.kind == typeFixed32 || key.kind == typeFixed64 || key.kind == typeEnum {
-		fmt.Fprintf(b, "        if %s != %s {\n", keyName, zero)
-		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map key", entryID, entryID+"_key_tag", 1, expectedWire(key.kind), 12); err != nil {
+	fmt.Fprintf(b, "        if %s != %s {\n", keyName, zero)
+	if err := emitWriterSizeAdd(b, entryID, sizeFieldExpr(1, expectedWire(key.kind), key, keyName, reg), "            ", owner.slangName+"."+name+": map entry exceeds configured byte limit"); err != nil {
+		return err
+	}
+	b.WriteString("        }\n")
+	if value.kind == typeMessage {
+		if err := emitWriterSizeAdd(b, entryID, sizeFieldExpr(2, expectedWire(value.kind), value, valueName, reg), "        ", owner.slangName+"."+name+": map entry exceeds configured byte limit"); err != nil {
 			return err
 		}
-		if err := emitWriteValue(b, owner.slangName+"."+name+" map key", key, entryID, keyName, 12, reg); err != nil {
+	} else {
+		fmt.Fprintf(b, "        if %s != %s {\n", valueName, zeroExpr(value.kind))
+		if err := emitWriterSizeAdd(b, entryID, sizeFieldExpr(2, expectedWire(value.kind), value, valueName, reg), "            ", owner.slangName+"."+name+": map entry exceeds configured byte limit"); err != nil {
+			return err
+		}
+		b.WriteString("        }\n")
+	}
+	fmt.Fprintf(b, "        if %s < 0 { grpc.proto_writer_fast_fail(writer, %q); return; }\n", entryID, owner.slangName+"."+name+": map entry exceeds configured byte limit")
+	if err := emitWriteTag(b, owner.slangName+"."+name, f.number, 2, 8); err != nil {
+		return err
+	}
+	fmt.Fprintf(b, "        grpc.proto_writer_varint_fast(writer, %s as u64);\n", entryID)
+	if key.kind == typeString || key.kind == typeBytes || key.kind == typeBool || key.kind == typeFloat || key.kind == typeDouble || key.kind == typeInt32 || key.kind == typeInt64 || key.kind == typeUint32 || key.kind == typeUint64 || key.kind == typeSint32 || key.kind == typeSint64 || key.kind == typeSfixed32 || key.kind == typeSfixed64 || key.kind == typeFixed32 || key.kind == typeFixed64 || key.kind == typeEnum {
+		fmt.Fprintf(b, "        if %s != %s {\n", keyName, zero)
+		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map key", "writer", entryID+"_key_tag", 1, expectedWire(key.kind), 12); err != nil {
+			return err
+		}
+		if err := emitWriteValue(b, owner.slangName+"."+name+" map key", key, "writer", keyName, 12, reg); err != nil {
 			return err
 		}
 		b.WriteString("        }\n")
 	}
 	if value.kind == typeMessage {
-		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map value", entryID, entryID+"_value_tag", 2, expectedWire(value.kind), 8); err != nil {
+		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map value", "writer", entryID+"_value_tag", 2, expectedWire(value.kind), 8); err != nil {
 			return err
 		}
-		if err := emitWriteValue(b, owner.slangName+"."+name+" map value", value, entryID, valueName, 8, reg); err != nil {
+		if err := emitWriteValue(b, owner.slangName+"."+name+" map value", value, "writer", valueName, 8, reg); err != nil {
 			return err
 		}
 	} else {
 		fmt.Fprintf(b, "        if %s != %s {\n", valueName, zeroExpr(value.kind))
-		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map value", entryID, entryID+"_value_tag", 2, expectedWire(value.kind), 12); err != nil {
+		if err := emitWriteTagTo(b, owner.slangName+"."+name+" map value", "writer", entryID+"_value_tag", 2, expectedWire(value.kind), 12); err != nil {
 			return err
 		}
-		if err := emitWriteValue(b, owner.slangName+"."+name+" map value", value, entryID, valueName, 12, reg); err != nil {
+		if err := emitWriteValue(b, owner.slangName+"."+name+" map value", value, "writer", valueName, 12, reg); err != nil {
 			return err
 		}
 		b.WriteString("        }\n")
 	}
-	fmt.Fprintf(b, "        let %s_bytes = grpc.proto_writer_finish(%s);\n", entryID, entryID)
-	if err := emitWriteTag(b, owner.slangName+"."+name, f.number, 2, 8); err != nil {
-		return err
-	}
-	if err := emitWriteBytesTo(b, owner.slangName+"."+name, "writer", entryID+"_bytes", entryID+"_outer", 8); err != nil {
-		return err
-	}
+	fmt.Fprintf(b, "        let %s_error = grpc.proto_writer_fast_error(writer);\n        if %s_error != \"\" { grpc.proto_writer_fast_context(writer, %q); return; }\n", entryID, entryID, owner.slangName+"."+name)
 	b.WriteString("    }\n")
 	return nil
 }
