@@ -118,7 +118,14 @@ thin adapter after the standalone package is stable.
   cost (safepoint brackets and thread-local reads, about a third of decode
   by profile) and one allocation per string field (`to_bytes` on encode).
   Local CPU numbers only; the cloud comparison and p99/RSS under an RPC
-  load remain outstanding, and need `rpc.sl`'s HTTP/2 client API in slang.
+  load remain outstanding.
+- HTTP/2 client (2026-10-24): `rpc.sl` now runs on slang's `http2` client
+  (`client_preface`/`client_request_msg`/`client_read_response`, and the
+  multiplexed `client_start`/`client_call` behind `grpc_call`) and its
+  `response_trailers_msg`. `tests/run.sh` passes end to end for the first
+  time, including unary and ten-way concurrent interop with Go's
+  `net/http` HTTP/2 server over TLS and the package unit tests, which it
+  did not run before.
 
 ## Release boundary
 
