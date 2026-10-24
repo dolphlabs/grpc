@@ -98,6 +98,27 @@ thin adapter after the standalone package is stable.
   using randomized ABBA order; local runs are correctness/smoke checks only.
 - Full slang `make test`, warning sweep, package consumer test, generated-file
   determinism check, and Go plugin tests before release.
+- Allocation budget: `bench/codec/run.sh --check` (run by `tests/run.sh`)
+  fails above 16 allocations per encode and 34 per decode of the consumer
+  fixture. Measured 2026-10-24 on the development laptop (macOS, Intel,
+  slangc 0.2.3): encode 125 -> 15 allocations and 11.1 KB -> 1.6 KB per
+  operation, decode 212 -> 33 and 13.9 KB -> 2.6 KB. Time, ABBA x4
+  medians with disjoint ranges: encode 13.5 -> 6.8 us, decode 12.5 -> 5.3
+  us.
+  The encoded bytes are identical to the previous encoder's. Primitives
+  return `result[T, int]` error codes because a result with a GC-pointer
+  payload is a heap object on every successful call; only the failure
+  path builds text.
+- Against Go (`bench/codec/compare-go.sh`, google.golang.org/protobuf
+  v1.36.12, same laptop, same fixture): Go's `proto.Marshal` output is
+  byte-identical to slang's and Go decodes slang's bytes to an equal
+  message. Go encodes in 1.3 us (7 allocations, 208 B) and decodes in
+  1.45 us (19, 944 B): slang is 5.1x Go's time to encode and 3.6x to decode,
+  from 10x and 8.6x before. Most of the rest is slang's per-call runtime
+  cost (safepoint brackets and thread-local reads, about a third of decode
+  by profile) and one allocation per string field (`to_bytes` on encode).
+  Local CPU numbers only; the cloud comparison and p99/RSS under an RPC
+  load remain outstanding, and need `rpc.sl`'s HTTP/2 client API in slang.
 
 ## Release boundary
 

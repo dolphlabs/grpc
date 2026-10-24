@@ -115,6 +115,22 @@ UTF-8, truncated values, unsupported compression, and limit violations.
 Nested messages share the original input buffer, and a parsed gRPC message
 is a view until `grpc_message_bytes` is requested.
 
+## Cost
+
+Decoding walks one reader over the whole message tree and allocates only
+the decoded values: strings, bytes, lists, maps and one result per
+message. Encoding sizes the message first, checks the total against the
+limit once, then writes every field into one buffer. For the 139-byte,
+21-field fixture in `tests/consumer`, `bench/codec/run.sh` reports 15
+allocations per encode and 33 per decode (125 and 212 before this
+design), about 1.6 KB and 2.6 KB allocated, and 2.0x and 2.4x the
+speed (6.8 and 5.3 us, from 13.5 and 12.5, on an Intel laptop).
+`tests/run.sh` fails above 16 and 34. `bench/codec/compare-go.sh` runs the
+same fixture through google.golang.org/protobuf: the bytes are identical, and
+Go is still 5.1x faster to encode and 3.6x to decode. Sizing is recomputed per nesting
+level, so a message nested d levels deep has its innermost fields sized d
+times; generated structs carry no size cache.
+
 ## Package layout
 
 - `src/grpc`: slang runtime package and focused unit tests.
