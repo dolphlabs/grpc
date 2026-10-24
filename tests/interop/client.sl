@@ -23,7 +23,7 @@ let conn = http2.conn_new();
 let writer: chan[http2.WMsg] = make_chan(16);
 let h2_limits = http2.default_limits();
 spawn http2.writer_task(transport, writer, h2_limits.write);
-let started = grpc.grpc_client_start(reader, transport, writer, h2_limits);
+let started = grpc.grpc_client_start(conn, reader, transport, writer, h2_limits);
 guard let _started = started else let e = err_of(started) { panic(e); }
 
 let user = new_User();
@@ -47,3 +47,37 @@ require(decoded.id == 17 && decoded.name == "Ada", "generated protobuf round tri
 net.tls_close(ssl);
 chan_close(writer);
 println("Go TLS HTTP/2 unary gRPC interop passed");
+
+// Many calls at once on ONE connection through http2.Client: each is its
+// own stream, and Go's server answers them concurrently.
+fn concurrent_call(client: http2.Client, encoded: bytes, out: chan[str]) {
+    let r = grpc.grpc_call(client, "https", "localhost:18443",
+        "/sample.UserService/Get",
+        [http2.Header { name: "x-request-id", value: "rpc-1" }],
+        encoded, grpc.grpc_default_limits(), 2000000000);
+    guard let call = r else let e = err_of(r) { chan_send(out, e); return; }
+    if call.status.code != grpc.GRPC_STATUS_OK || call.status.message != "interop ok" {
+        chan_send(out, "status " + to_str(call.status.code));
+        return;
+    }
+    guard let m = call.message else { chan_send(out, "no message"); return; }
+    let d = decode_User(grpc.grpc_message_bytes(m), grpc.proto_default_limits());
+    guard let u = d else let e = err_of(d) { chan_send(out, e); return; }
+    if u.id != 17 || u.name != "Ada" { chan_send(out, "wrong message"); return; }
+    chan_send(out, "");
+}
+
+let dial2 = net.tls_dial("localhost", 18443, context);
+guard let ssl2 = dial2 else let e = err_of(dial2) { panic(e); }
+let client_result = http2.client_start(http2.transport_tls(ssl2), h2_limits);
+guard let client = client_result else let e = err_of(client_result) { panic(e); }
+let results: chan[str] = make_chan(16);
+for i in 0..10 {
+    spawn concurrent_call(client, encoded, results);
+}
+for i in 0..10 {
+    let got = chan_recv(results) ?? "closed";
+    require(got == "", "concurrent call: " + got);
+}
+http2.client_close(client);
+println("Go TLS HTTP/2 multiplexed gRPC interop passed");

@@ -28,6 +28,11 @@ if [ "$actual" != "$expected" ]; then
 fi
 printf '%s\n' "$actual"
 
+# The package's own unit tests (proto, framing, metadata, status, rpc),
+# normally and under minor-GC verification.
+(cd "$repo/src/grpc" && "$slangc" test)
+(cd "$repo/src/grpc" && SLANG_GC_VERIFY_MINOR=1 SLANG_GC_NURSERY_KB=16 "$slangc" test)
+
 # The codec's allocation budget: a regression that boxes a value per field
 # again fails here rather than in a benchmark nobody reran.
 SLANGC="$slangc" ITERATIONS=20000 "$repo/bench/codec/run.sh" --check
