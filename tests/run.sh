@@ -28,6 +28,10 @@ if [ "$actual" != "$expected" ]; then
 fi
 printf '%s\n' "$actual"
 
+# The codec's allocation budget: a regression that boxes a value per field
+# again fails here rather than in a benchmark nobody reran.
+SLANGC="$slangc" ITERATIONS=20000 "$repo/bench/codec/run.sh" --check
+
 go build -o "$run_dir/interop-server" "$repo/tests/interop/server.go"
 "$run_dir/interop-server" "$run_dir/cert.pem" &
 server_pid=$!

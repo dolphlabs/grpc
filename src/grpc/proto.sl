@@ -15,37 +15,70 @@ pub let PROTO_HARD_MAX_DEPTH = 64;
 pub let PROTO_DEFAULT_MAX_VALUES = 100000;
 pub let PROTO_HARD_MAX_VALUES = 1000000;
 
+// Reader failures are integer codes, not strings: a result whose payloads
+// hold no GC pointer is a plain value, while a result[T, str] is a heap
+// object on every successful call. Decoding a message makes one such call
+// per field, so the text is built only on the failure path, with
+// proto_error_text, by the caller that knows the field's name.
+pub let PROTO_ERR_TRUNCATED = 1;
+pub let PROTO_ERR_VARINT_OVERFLOW = 2;
+pub let PROTO_ERR_VARINT_NONCANONICAL = 3;
+pub let PROTO_ERR_VARINT_TOO_LONG = 4;
+pub let PROTO_ERR_FIELD_NUMBER = 5;
+pub let PROTO_ERR_WIRE_TYPE = 6;
+pub let PROTO_ERR_LENGTH_LIMIT = 7;
+pub let PROTO_ERR_LENGTH_REMAINING = 8;
+pub let PROTO_ERR_UTF8 = 9;
+pub let PROTO_ERR_NUL = 10;
+pub let PROTO_ERR_DEPTH = 11;
+pub let PROTO_ERR_VALUES = 12;
+pub let PROTO_ERR_NOT_CONSUMED = 13;
+pub let PROTO_ERR_FLOAT = 14;
+
 pub gc struct Limits {
     max_message_bytes: int,
     max_depth: int,
     max_values: int
 }
 
-pub struct Tag {
-    field_number: int,
-    wire_type: int
-}
-
-gc struct Budget {
-    values: int,
-    max_values: int
-}
-
-// Reader ranges share one input byte string and one aggregate value budget.
-// A nested message therefore adds a small reader object, not a copy of its
-// full payload, and cannot evade limits by nesting sub-readers.
+// One reader walks a whole message tree. A length-delimited value narrows
+// `end` with proto_reader_enter and widens it again with proto_reader_leave,
+// so a nested message, packed field or map entry costs no reader object and
+// no copy, and the value budget is shared by construction.
 pub gc struct Reader {
     data: bytes,
     pos: int,
     end: int,
     depth: int,
     limits: Limits,
-    budget: Budget
+    values: int
 }
 
+// Encoders size a message first (generated size_<Message> functions), check
+// the total against the limit once, then write the whole tree into this one
+// builder. Writes therefore cannot fail and return nothing.
 pub gc struct Writer {
-    out: builder.Bytes,
-    limits: Limits
+    out: builder.Bytes
+}
+
+pub fn proto_error_text(code: int) -> str {
+    switch code {
+      case 1 { return "truncated value"; }
+      case 2 { return "varint overflows uint64"; }
+      case 3 { return "non-canonical varint"; }
+      case 4 { return "varint exceeds ten bytes"; }
+      case 5 { return "field number is outside 1..536870911"; }
+      case 6 { return "unsupported wire type"; }
+      case 7 { return "length exceeds configured message limit"; }
+      case 8 { return "length exceeds remaining message bytes"; }
+      case 9 { return "invalid UTF-8"; }
+      case 10 { return "embedded NUL cannot be represented by slang str"; }
+      case 11 { return "nesting exceeds configured limit"; }
+      case 12 { return "value count exceeds configured limit"; }
+      case 13 { return "submessage was not fully consumed"; }
+      case 14 { return "invalid floating-point value"; }
+      default { return "unknown protobuf error " + to_str(code); }
+    }
 }
 
 pub fn proto_default_limits() -> Limits {
@@ -81,18 +114,17 @@ pub fn proto_reader(raw: bytes, limits: Limits) -> result[Reader, str] {
     if len(raw) > limits.max_message_bytes {
         return err("grpc.proto reader: message exceeds configured byte limit");
     }
-    let budget = Budget { values: 0, max_values: limits.max_values };
     return ok(Reader {
         data: raw,
         pos: 0,
         end: len(raw),
         depth: 0,
         limits: limits,
-        budget: budget
+        values: 0
     });
 }
 
-fn proto_limits_valid(limits: Limits) -> bool {
+pub fn proto_limits_valid(limits: Limits) -> bool {
     return limits.max_message_bytes >= 1 &&
            limits.max_message_bytes <= PROTO_HARD_MAX_BYTES &&
            limits.max_depth >= 1 && limits.max_depth <= PROTO_HARD_MAX_DEPTH &&
@@ -107,66 +139,76 @@ pub fn proto_reader_remaining(r: Reader) -> int {
     return r.end - r.pos;
 }
 
-// Charge packed repeated values as well as top-level tags against one budget.
-pub fn proto_reader_charge(r: Reader) -> result[bool, str] {
-    if r.budget.values >= r.budget.max_values {
-        return err("grpc.proto reader: value count exceeds configured limit");
+// Charge packed repeated values as well as top-level keys against one budget.
+pub fn proto_reader_charge(r: Reader) -> result[bool, int] {
+    if r.values >= r.limits.max_values {
+        return err(PROTO_ERR_VALUES);
     }
-    r.budget.values = r.budget.values + 1;
+    r.values = r.values + 1;
     return ok(true);
 }
 
-pub fn proto_reader_tag(r: Reader) -> result[opt[Tag], str] {
+// The next field's key, `field_number << 3 | wire_type`, or 0 at the end of
+// the current message. Zero is never a valid key: field number zero is
+// rejected, so it can mark the end without an opt.
+pub fn proto_reader_key(r: Reader) -> result[int, int] {
     if r.pos == r.end {
-        return ok(none);
+        return ok(0);
     }
-    let charged = proto_reader_charge(r);
-    guard let _c = charged else let e = err_of(charged) { return err(e); }
-    let value_result = proto_reader_varint(r);
-    guard let value = value_result else let e = err_of(value_result) {
-        return err("grpc.proto tag: " + e);
+    if r.values >= r.limits.max_values {
+        return err(PROTO_ERR_VALUES);
+    }
+    r.values = r.values + 1;
+    let read = proto_reader_varint(r);
+    guard let value = read else let code = err_of(read) {
+        return err(code);
     }
     let number = value >> 3;
     if number == 0 || number > PROTO_MAX_FIELD as u64 {
-        return err("grpc.proto tag: field number is outside 1..536870911");
+        return err(PROTO_ERR_FIELD_NUMBER);
     }
     let wire = (value & 7) as int;
     if wire != PROTO_VARINT && wire != PROTO_FIXED64 &&
        wire != PROTO_BYTES && wire != PROTO_FIXED32 {
-        return err("grpc.proto tag: unsupported wire type");
+        return err(PROTO_ERR_WIRE_TYPE);
     }
-    return ok(some(Tag { field_number: number as int, wire_type: wire }));
+    return ok(value as int);
 }
 
 // Read at most ten bytes. The tenth byte may carry only bit zero; accepting
 // any other bits wraps uint64 and can alias malformed tags or lengths.
-pub fn proto_reader_varint(r: Reader) -> result[u64, str] {
+pub fn proto_reader_varint(r: Reader) -> result[u64, int] {
+    if r.pos < r.end && r.data[r.pos] < 128 {
+        let one = r.data[r.pos] as u64;
+        r.pos = r.pos + 1;
+        return ok(one);
+    }
     let value: u64 = 0;
     let shift = 0;
     while shift <= 63 {
         if r.pos >= r.end {
-            return err("truncated varint");
+            return err(PROTO_ERR_TRUNCATED);
         }
         let b = r.data[r.pos];
         r.pos = r.pos + 1;
         if shift == 63 && b > 1 {
-            return err("varint overflows uint64");
+            return err(PROTO_ERR_VARINT_OVERFLOW);
         }
         value = value | (((b & 127) as u64) << shift);
         if b < 128 {
             if shift > 0 && b == 0 {
-                return err("non-canonical varint");
+                return err(PROTO_ERR_VARINT_NONCANONICAL);
             }
             return ok(value);
         }
         shift = shift + 7;
     }
-    return err("varint exceeds ten bytes");
+    return err(PROTO_ERR_VARINT_TOO_LONG);
 }
 
-pub fn proto_reader_fixed32(r: Reader) -> result[u32, str] {
+pub fn proto_reader_fixed32(r: Reader) -> result[u32, int] {
     if r.end - r.pos < 4 {
-        return err("truncated fixed32");
+        return err(PROTO_ERR_TRUNCATED);
     }
     let value = (r.data[r.pos] as u32) |
                 ((r.data[r.pos + 1] as u32) << 8) |
@@ -176,63 +218,208 @@ pub fn proto_reader_fixed32(r: Reader) -> result[u32, str] {
     return ok(value);
 }
 
-pub fn proto_reader_fixed64(r: Reader) -> result[u64, str] {
+pub fn proto_reader_fixed64(r: Reader) -> result[u64, int] {
     if r.end - r.pos < 8 {
-        return err("truncated fixed64");
+        return err(PROTO_ERR_TRUNCATED);
     }
-    let value: u64 = 0;
-    let i = 0;
-    while i < 8 {
-        value = value | ((r.data[r.pos + i] as u64) << (i * 8));
-        i = i + 1;
-    }
-    r.pos = r.pos + 8;
+    let p = r.pos;
+    let value = (r.data[p] as u64) |
+                ((r.data[p + 1] as u64) << 8) |
+                ((r.data[p + 2] as u64) << 16) |
+                ((r.data[p + 3] as u64) << 24) |
+                ((r.data[p + 4] as u64) << 32) |
+                ((r.data[p + 5] as u64) << 40) |
+                ((r.data[p + 6] as u64) << 48) |
+                ((r.data[p + 7] as u64) << 56);
+    r.pos = p + 8;
     return ok(value);
 }
 
-fn proto_reader_length(r: Reader) -> result[int, str] {
-    let length_result = proto_reader_varint(r);
-    guard let length = length_result else let e = err_of(length_result) {
-        return err("length: " + e);
+// Reads a length prefix and returns where the value ends, leaving `pos` at
+// its first byte.
+pub fn proto_reader_open(r: Reader) -> result[int, int] {
+    let read = proto_reader_varint(r);
+    guard let length = read else let code = err_of(read) {
+        return err(code);
     }
     if length > r.limits.max_message_bytes as u64 {
-        return err("length exceeds configured message limit");
+        return err(PROTO_ERR_LENGTH_LIMIT);
     }
     if length > (r.end - r.pos) as u64 {
-        return err("length exceeds remaining message bytes");
+        return err(PROTO_ERR_LENGTH_REMAINING);
     }
-    return ok(length as int);
+    return ok(r.pos + length as int);
 }
 
-// Returns one owned field value. Use proto_reader_submessage for nested
-// messages so their input bytes are shared until individual fields are read.
-pub fn proto_reader_bytes(r: Reader) -> result[bytes, str] {
-    let length_result = proto_reader_length(r);
-    guard let length = length_result else let e = err_of(length_result) {
-        return err("grpc.proto bytes: " + e);
-    }
+// A bytes field: the copy from `pos` to `end` (from proto_reader_open).
+pub fn proto_reader_take_bytes(r: Reader, end: int) -> bytes {
     let start = r.pos;
-    r.pos = r.pos + length;
-    return ok(r.data[start..r.pos]);
-}
-
-pub fn proto_reader_string(r: Reader) -> result[str, str] {
-    let length_result = proto_reader_length(r);
-    guard let length = length_result else let e = err_of(length_result) {
-        return err("grpc.proto string: " + e);
-    }
-    let start = r.pos;
-    let end = start + length;
-    if !proto_utf8_valid(r.data, start, end) {
-        return err("grpc.proto string: invalid UTF-8");
-    }
-    if proto_has_nul(r.data, start, end) {
-        return err("grpc.proto string: embedded NUL cannot be represented by slang str");
-    }
     r.pos = end;
-    return ok(strings.from_bytes(r.data, start, end));
+    return r.data[start..end];
 }
 
+// A string field's end, after checking its bytes are UTF-8 a slang str can
+// hold. Take it with proto_reader_take_string.
+pub fn proto_reader_string_end(r: Reader) -> result[int, int] {
+    let opened = proto_reader_open(r);
+    guard let end = opened else let code = err_of(opened) {
+        return err(code);
+    }
+    let bad = proto_text_error(r.data, r.pos, end);
+    if bad != 0 {
+        return err(bad);
+    }
+    return ok(end);
+}
+
+pub fn proto_reader_take_string(r: Reader, end: int) -> str {
+    let start = r.pos;
+    r.pos = end;
+    return strings.from_bytes(r.data, start, end);
+}
+
+// Narrows the reader to a nested message or map entry and returns the outer
+// end to give back to proto_reader_leave.
+pub fn proto_reader_enter(r: Reader) -> result[int, int] {
+    if r.depth >= r.limits.max_depth {
+        return err(PROTO_ERR_DEPTH);
+    }
+    let opened = proto_reader_open(r);
+    guard let end = opened else let code = err_of(opened) {
+        return err(code);
+    }
+    let outer = r.end;
+    r.end = end;
+    r.depth = r.depth + 1;
+    return ok(outer);
+}
+
+pub fn proto_reader_leave(r: Reader, outer: int) -> result[bool, int] {
+    if r.pos != r.end {
+        return err(PROTO_ERR_NOT_CONSUMED);
+    }
+    r.end = outer;
+    r.depth = r.depth - 1;
+    return ok(true);
+}
+
+// Packed fields are length-delimited ranges but not a nesting level. Their
+// elements are charged against the same value budget as their parent.
+pub fn proto_reader_enter_packed(r: Reader) -> result[int, int] {
+    let opened = proto_reader_open(r);
+    guard let end = opened else let code = err_of(opened) {
+        return err(code);
+    }
+    let outer = r.end;
+    r.end = end;
+    return ok(outer);
+}
+
+pub fn proto_reader_leave_packed(r: Reader, outer: int) -> result[bool, int] {
+    if r.pos != r.end {
+        return err(PROTO_ERR_NOT_CONSUMED);
+    }
+    r.end = outer;
+    return ok(true);
+}
+
+// Skip one unknown field's value after its key has been read. Lengths are
+// checked against both the message limit and the current range.
+pub fn proto_reader_skip(r: Reader, wire_type: int) -> result[bool, int] {
+    if wire_type == PROTO_VARINT {
+        let read = proto_reader_varint(r);
+        guard let _value = read else let code = err_of(read) {
+            return err(code);
+        }
+        return ok(true);
+    }
+    if wire_type == PROTO_FIXED64 {
+        if r.end - r.pos < 8 { return err(PROTO_ERR_TRUNCATED); }
+        r.pos = r.pos + 8;
+        return ok(true);
+    }
+    if wire_type == PROTO_BYTES {
+        let opened = proto_reader_open(r);
+        guard let end = opened else let code = err_of(opened) {
+            return err(code);
+        }
+        r.pos = end;
+        return ok(true);
+    }
+    if wire_type == PROTO_FIXED32 {
+        if r.end - r.pos < 4 { return err(PROTO_ERR_TRUNCATED); }
+        r.pos = r.pos + 4;
+        return ok(true);
+    }
+    return err(PROTO_ERR_WIRE_TYPE);
+}
+
+// 0 when raw[start..end] is UTF-8 without NUL, else PROTO_ERR_UTF8 or
+// PROTO_ERR_NUL. One pass over the bytes: a slang str is NUL-terminated and
+// strings.from_bytes is a raw copy, not a validating decoder.
+fn proto_text_error(raw: bytes, start: int, end: int) -> int {
+    let i = start;
+    while i < end {
+        let a = raw[i];
+        if a == 0 {
+            return PROTO_ERR_NUL;
+        }
+        if a <= 0x7f {
+            i = i + 1;
+            continue;
+        }
+        if a >= 0xc2 && a <= 0xdf {
+            if i + 1 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf {
+                return PROTO_ERR_UTF8;
+            }
+            i = i + 2;
+            continue;
+        }
+        if a == 0xe0 {
+            if i + 2 >= end || raw[i + 1] < 0xa0 || raw[i + 1] > 0xbf ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 3;
+            continue;
+        }
+        if (a >= 0xe1 && a <= 0xec) || (a >= 0xee && a <= 0xef) {
+            if i + 2 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 3;
+            continue;
+        }
+        if a == 0xed {
+            if i + 2 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0x9f ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 3;
+            continue;
+        }
+        if a == 0xf0 {
+            if i + 3 >= end || raw[i + 1] < 0x90 || raw[i + 1] > 0xbf ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
+               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 4;
+            continue;
+        }
+        if a >= 0xf1 && a <= 0xf3 {
+            if i + 3 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
+               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 4;
+            continue;
+        }
+        if a == 0xf4 {
+            if i + 3 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0x8f ||
+               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
+               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return PROTO_ERR_UTF8; }
+            i = i + 4;
+            continue;
+        }
+        return PROTO_ERR_UTF8;
+    }
+    return 0;
+}
+
+// Kept for rpc.sl's metadata checks, which want the two answers apart.
 fn proto_has_nul(raw: bytes, start: int, end: int) -> bool {
     let i = start;
     while i < end {
@@ -242,147 +429,24 @@ fn proto_has_nul(raw: bytes, start: int, end: int) -> bool {
     return false;
 }
 
-// Protobuf strings must be valid UTF-8. Validate the original bytes before
-// converting because slang str is NUL-terminated and strings.from_bytes is
-// intentionally a raw byte copy, not a validating decoder.
 fn proto_utf8_valid(raw: bytes, start: int, end: int) -> bool {
-    let i = start;
-    while i < end {
-        let a = raw[i];
-        if a <= 0x7f {
-            i = i + 1;
-            continue;
-        }
-        if a >= 0xc2 && a <= 0xdf {
-            if i + 1 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf {
-                return false;
-            }
-            i = i + 2;
-            continue;
-        }
-        if a == 0xe0 {
-            if i + 2 >= end || raw[i + 1] < 0xa0 || raw[i + 1] > 0xbf ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return false; }
-            i = i + 3;
-            continue;
-        }
-        if (a >= 0xe1 && a <= 0xec) || (a >= 0xee && a <= 0xef) {
-            if i + 2 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return false; }
-            i = i + 3;
-            continue;
-        }
-        if a == 0xed {
-            if i + 2 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0x9f ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf { return false; }
-            i = i + 3;
-            continue;
-        }
-        if a == 0xf0 {
-            if i + 3 >= end || raw[i + 1] < 0x90 || raw[i + 1] > 0xbf ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
-               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return false; }
-            i = i + 4;
-            continue;
-        }
-        if a >= 0xf1 && a <= 0xf3 {
-            if i + 3 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0xbf ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
-               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return false; }
-            i = i + 4;
-            continue;
-        }
-        if a == 0xf4 {
-            if i + 3 >= end || raw[i + 1] < 0x80 || raw[i + 1] > 0x8f ||
-               raw[i + 2] < 0x80 || raw[i + 2] > 0xbf ||
-               raw[i + 3] < 0x80 || raw[i + 3] > 0xbf { return false; }
-            i = i + 4;
-            continue;
-        }
-        return false;
-    }
-    return true;
+    return proto_text_error(raw, start, end) != PROTO_ERR_UTF8;
 }
-
-pub fn proto_reader_submessage(r: Reader) -> result[Reader, str] {
-    if r.depth >= r.limits.max_depth {
-        return err("grpc.proto submessage: nesting exceeds configured limit");
-    }
-    let length_result = proto_reader_length(r);
-    guard let length = length_result else let e = err_of(length_result) {
-        return err("grpc.proto submessage: " + e);
-    }
-    let start = r.pos;
-    r.pos = r.pos + length;
-    return ok(Reader {
-        data: r.data,
-        pos: start,
-        end: start + length,
-        depth: r.depth + 1,
-        limits: r.limits,
-        budget: r.budget
-    });
-}
-
-// Skip one unknown field's value after its tag has been read. Lengths are
-// checked against both the shared message budget and the current submessage.
-pub fn proto_reader_skip(r: Reader, wire_type: int) -> result[bool, str] {
-    if wire_type == PROTO_VARINT {
-        let value_result = proto_reader_varint(r);
-        guard let _value = value_result else let e = err_of(value_result) {
-            return err("grpc.proto skip: " + e);
-        }
-        return ok(true);
-    }
-    if wire_type == PROTO_FIXED64 {
-        if r.end - r.pos < 8 { return err("grpc.proto skip: truncated fixed64"); }
-        r.pos = r.pos + 8;
-        return ok(true);
-    }
-    if wire_type == PROTO_BYTES {
-        let length_result = proto_reader_length(r);
-        guard let length = length_result else let e = err_of(length_result) {
-            return err("grpc.proto skip: " + e);
-        }
-        r.pos = r.pos + length;
-        return ok(true);
-    }
-    if wire_type == PROTO_FIXED32 {
-        if r.end - r.pos < 4 { return err("grpc.proto skip: truncated fixed32"); }
-        r.pos = r.pos + 4;
-        return ok(true);
-    }
-    return err("grpc.proto skip: unsupported wire type");
-}
-
 
 // IEEE-754 codecs use slang's generic binary64 byte helpers. Protobuf float
 // (binary32) is converted explicitly with round-to-nearest, ties-to-even so
 // host endianness and the C compiler's numeric casts never affect the wire.
-pub fn proto_reader_double(r: Reader) -> result[float, str] {
-    let bits_result = proto_reader_fixed64(r);
-    guard let bits = bits_result else let e = err_of(bits_result) { return err(e); }
+pub fn proto_reader_double(r: Reader) -> result[float, int] {
+    let read = proto_reader_fixed64(r);
+    guard let bits = read else let code = err_of(read) { return err(code); }
     let decoded = encoding.float64_from_le(proto_u64_le(bits));
-    guard let value = decoded else let e = err_of(decoded) {
-        return err("grpc.proto double: " + e);
-    }
+    guard let value = decoded else { return err(PROTO_ERR_FLOAT); }
     return ok(value);
 }
 
-pub fn proto_writer_double(w: Writer, value: float) -> result[bool, str] {
-    let raw = encoding.float64_to_le(value);
-    let bits: u64 = 0;
-    let i = 0;
-    while i < 8 {
-        bits = bits | ((raw[i] as u64) << (i * 8));
-        i = i + 1;
-    }
-    return proto_writer_fixed64(w, bits);
-}
-
-pub fn proto_reader_float(r: Reader) -> result[float, str] {
-    let bits_result = proto_reader_fixed32(r);
-    guard let bits = bits_result else let e = err_of(bits_result) { return err(e); }
+pub fn proto_reader_float(r: Reader) -> result[float, int] {
+    let read = proto_reader_fixed32(r);
+    guard let bits = read else let code = err_of(read) { return err(code); }
     let sign = ((bits >> 31) as u64) << 63;
     let exponent = ((bits >> 23) & 255) as int;
     let fraction = bits & 0x7fffff;
@@ -409,13 +473,11 @@ pub fn proto_reader_float(r: Reader) -> result[float, str] {
         }
     }
     let decoded = encoding.float64_from_le(proto_u64_le(bits64));
-    guard let value = decoded else let e = err_of(decoded) {
-        return err("grpc.proto float: " + e);
-    }
+    guard let value = decoded else { return err(PROTO_ERR_FLOAT); }
     return ok(value);
 }
 
-pub fn proto_writer_float(w: Writer, value: float) -> result[bool, str] {
+fn proto_double_bits(value: float) -> u64 {
     let raw = encoding.float64_to_le(value);
     let bits: u64 = 0;
     let i = 0;
@@ -423,6 +485,11 @@ pub fn proto_writer_float(w: Writer, value: float) -> result[bool, str] {
         bits = bits | ((raw[i] as u64) << (i * 8));
         i = i + 1;
     }
+    return bits;
+}
+
+fn proto_float_bits(value: float) -> u32 {
+    let bits = proto_double_bits(value);
     let sign = ((bits >> 63) as u32) << 31;
     let exp64 = ((bits >> 52) & 2047) as int;
     let fraction64 = bits & 4503599627370495 as u64;
@@ -465,7 +532,7 @@ pub fn proto_writer_float(w: Writer, value: float) -> result[bool, str] {
             }
         }
     }
-    return proto_writer_fixed32(w, out_bits);
+    return out_bits;
 }
 
 fn proto_round_shift(value: u64, shift: int) -> u64 {
@@ -489,32 +556,20 @@ fn proto_u64_le(value: u64) -> bytes {
     return raw;
 }
 
-pub fn proto_writer(limits: Limits) -> result[Writer, str] {
-    if !proto_limits_valid(limits) {
-        return err("grpc.proto writer: invalid limits");
-    }
-    return ok(Writer { out: builder.new_bytes(), limits: limits });
+pub fn proto_writer() -> Writer {
+    return Writer { out: builder.new_bytes() };
 }
 
 pub fn proto_writer_size(w: Writer) -> int {
     return w.out.size();
 }
 
-pub fn proto_writer_varint(w: Writer, value: u64) -> result[bool, str] {
-    let n = proto_varint_size(value);
-    if w.out.size() > w.limits.max_message_bytes - n {
-        return err("grpc.proto writer: message exceeds configured byte limit");
-    }
-    let rest = value;
-    while rest > 127 {
-        w.out.write_byte(((rest & 127) as int) | 128);
-        rest = rest >> 7;
-    }
-    w.out.write_byte(rest as int);
-    return ok(true);
+pub fn proto_writer_finish(w: Writer) -> bytes {
+    return w.out.take();
 }
 
-fn proto_varint_size(value: u64) -> int {
+// Encoded sizes, for the generated size_<Message> pass.
+pub fn proto_size_varint(value: u64) -> int {
     let n = 1;
     let rest = value;
     while rest > 127 {
@@ -524,79 +579,66 @@ fn proto_varint_size(value: u64) -> int {
     return n;
 }
 
-pub fn proto_writer_tag(w: Writer, field_number: int,
-                        wire_type: int) -> result[bool, str] {
-    if field_number < 1 || field_number > PROTO_MAX_FIELD {
-        return err("grpc.proto writer tag: field number is outside 1..536870911");
-    }
-    if wire_type != PROTO_VARINT && wire_type != PROTO_FIXED64 &&
-       wire_type != PROTO_BYTES && wire_type != PROTO_FIXED32 {
-        return err("grpc.proto writer tag: unsupported wire type");
-    }
-    let tag = ((field_number as u64) << 3) | wire_type as u64;
-    return proto_writer_varint(w, tag);
+pub fn proto_size_key(field_number: int) -> int {
+    return proto_size_varint((field_number as u64) << 3);
 }
 
-pub fn proto_writer_bytes(w: Writer, value: bytes) -> result[bool, str] {
-    let size = len(value);
-    let length_size = proto_varint_size(size as u64);
-    if size > w.limits.max_message_bytes ||
-       w.out.size() > w.limits.max_message_bytes - size - length_size {
-        return err("grpc.proto writer: message exceeds configured byte limit");
+// A length-delimited value of `size` bytes, with its length prefix.
+pub fn proto_size_delimited(size: int) -> int {
+    return proto_size_varint(size as u64) + size;
+}
+
+pub fn proto_write_varint(w: Writer, value: u64) {
+    let rest = value;
+    while rest > 127 {
+        w.out.write_byte(((rest & 127) as int) | 128);
+        rest = rest >> 7;
     }
-    let encoded_length = proto_writer_varint(w, size as u64);
-    guard let _length = encoded_length else let e = err_of(encoded_length) {
-        return err(e);
-    }
+    w.out.write_byte(rest as int);
+}
+
+// Field numbers and wire types come from generated code, which only emits
+// valid ones; the generator rejects the rest.
+pub fn proto_write_key(w: Writer, field_number: int, wire_type: int) {
+    proto_write_varint(w, ((field_number as u64) << 3) | wire_type as u64);
+}
+
+pub fn proto_write_bytes(w: Writer, value: bytes) {
+    proto_write_varint(w, len(value) as u64);
     w.out.write(value);
-    return ok(true);
 }
 
-pub fn proto_writer_fixed32(w: Writer, value: u32) -> result[bool, str] {
-    if w.out.size() > w.limits.max_message_bytes - 4 {
-        return err("grpc.proto writer: message exceeds configured byte limit");
-    }
-    let i = 0;
-    while i < 4 {
-        w.out.write_byte(((value >> (8 * i)) & 255) as int);
-        i = i + 1;
-    }
-    return ok(true);
+pub fn proto_write_string(w: Writer, value: str) {
+    proto_write_varint(w, len(value) as u64);
+    w.out.write_str(value);
 }
 
-pub fn proto_writer_fixed64(w: Writer, value: u64) -> result[bool, str] {
-    if w.out.size() > w.limits.max_message_bytes - 8 {
-        return err("grpc.proto writer: message exceeds configured byte limit");
+pub fn proto_write_bool(w: Writer, value: bool) {
+    if value {
+        w.out.write_byte(1);
+    } else {
+        w.out.write_byte(0);
     }
-    let i = 0;
-    while i < 8 {
-        w.out.write_byte(((value >> (8 * i)) & 255) as int);
-        i = i + 1;
-    }
-    return ok(true);
 }
 
-pub fn proto_writer_finish(w: Writer) -> bytes {
-    return w.out.finish();
+pub fn proto_write_fixed32(w: Writer, value: u32) {
+    w.out.write_byte((value & 255) as int);
+    w.out.write_byte(((value >> 8) & 255) as int);
+    w.out.write_byte(((value >> 16) & 255) as int);
+    w.out.write_byte(((value >> 24) & 255) as int);
 }
 
-// Packed fields are length-delimited subranges but do not consume a protobuf
-// nesting level. They share the same aggregate value budget as their parent.
-pub fn proto_reader_packed(r: Reader) -> result[Reader, str] {
-    let length_result = proto_reader_length(r);
-    guard let length = length_result else let e = err_of(length_result) {
-        return err("grpc.proto packed field: " + e);
-    }
-    let start = r.pos;
-    r.pos = r.pos + length;
-    return ok(Reader {
-        data: r.data,
-        pos: start,
-        end: start + length,
-        depth: r.depth,
-        limits: r.limits,
-        budget: r.budget
-    });
+pub fn proto_write_fixed64(w: Writer, value: u64) {
+    proto_write_fixed32(w, (value & 4294967295) as u32);
+    proto_write_fixed32(w, (value >> 32) as u32);
+}
+
+pub fn proto_write_double(w: Writer, value: float) {
+    proto_write_fixed64(w, proto_double_bits(value));
+}
+
+pub fn proto_write_float(w: Writer, value: float) {
+    proto_write_fixed32(w, proto_float_bits(value));
 }
 
 pub fn proto_int32_from_wire(value: u64) -> int {
@@ -609,6 +651,10 @@ pub fn proto_int32_wire_valid(value: u64) -> bool {
 
 pub fn proto_int32_to_wire(value: int) -> u64 {
     return ((value as i32) as int) as u64;
+}
+
+pub fn proto_int32_in_range(value: int) -> bool {
+    return value >= -2147483648 && value <= 2147483647;
 }
 
 pub fn proto_sint32_from_wire(value: u64) -> int {
@@ -630,19 +676,4 @@ pub fn proto_sint64_from_wire(value: u64) -> int {
 pub fn proto_sint64_to_wire(value: int) -> u64 {
     let bits = value as u64;
     return (bits << 1) ^ (0 as u64 - (bits >> 63));
-}
-
-pub fn proto_writer_string(w: Writer, value: str) -> result[bool, str] {
-    let size = len(value);
-    let length_size = proto_varint_size(size as u64);
-    if size > w.limits.max_message_bytes ||
-       w.out.size() > w.limits.max_message_bytes - size - length_size {
-        return err("grpc.proto writer: message exceeds configured byte limit");
-    }
-    let encoded_length = proto_writer_varint(w, size as u64);
-    guard let _length = encoded_length else let e = err_of(encoded_length) {
-        return err(e);
-    }
-    w.out.write_str(value);
-    return ok(true);
 }

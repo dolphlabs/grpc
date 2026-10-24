@@ -73,4 +73,30 @@ guard let future_raw = future_raw_result else let e = err_of(future_raw_result) 
 let future_decoded_result = decode_User(future_raw, limits);
 guard let future_decoded = future_decoded_result else let e = err_of(future_decoded_result) { panic(e); }
 require(future_decoded.color == 99, "unknown enum value round trip");
+
+// Encoding sizes first and writes second; a value the size pass cannot
+// encode is reported by field, including inside a map's message values.
+let wide = new_User();
+wide.id = 2147483648;
+let wide_result = encode_User(wide, limits);
+if let _w = wide_result {
+    panic("gRPC consumer failed: int32 above range encoded");
+} else let e = err_of(wide_result) {
+    require(e == "User.id: value is outside int32 range", "int32 encode error names the field: " + e);
+}
+let nested_wide = new_User();
+nested_wide.labels["x"] = -2147483649;
+let nested_result = encode_User(nested_wide, limits);
+if let _n = nested_result {
+    panic("gRPC consumer failed: map int32 below range encoded");
+} else let e = err_of(nested_result) {
+    require(e == "User.labels map value: value is outside int32 range", "map encode error: " + e);
+}
+let small_limits_result = grpc.proto_new_limits(16, 8, 64);
+guard let small_limits = small_limits_result else let e = err_of(small_limits_result) { panic(e); }
+require(is_err(encode_User(user, small_limits)), "message over the byte limit encoded");
+let short_child = decode_User(b"\x5a\x03\x0a\x01", limits);
+require(is_err(short_child), "submessage length past the input accepted");
+let open_child = decode_User(b"\x5a\x02\x0a\x05", limits);
+require(is_err(open_child), "submessage field running past its parent accepted");
 println("generated codecs ok");

@@ -1,4 +1,4 @@
-import "builder";
+import "strings";
 
 pub let GRPC_DEFAULT_MAX_MESSAGE_BYTES = 4194304;
 pub let GRPC_HARD_MAX_MESSAGE_BYTES = 67108864;
@@ -52,14 +52,15 @@ pub fn grpc_frame_message(message: bytes, limits: GrpcLimits)
     if len(message) > limits.max_message_bytes {
         return err("grpc frame: message exceeds configured byte limit");
     }
-    let out = builder.new_bytes();
-    out.write_byte(0);
-    out.write_byte((len(message) >> 24) & 255);
-    out.write_byte((len(message) >> 16) & 255);
-    out.write_byte((len(message) >> 8) & 255);
-    out.write_byte(len(message) & 255);
-    out.write(message);
-    return ok(out.finish());
+    // One copy of the message, by join_bytes's memcpy, behind the five
+    // envelope bytes: a builder would copy it twice (piece, then finish).
+    let size = len(message);
+    let prefix = b"\x00\x00\x00\x00\x00";
+    prefix[1] = (size >> 24) & 255;
+    prefix[2] = (size >> 16) & 255;
+    prefix[3] = (size >> 8) & 255;
+    prefix[4] = size & 255;
+    return ok(strings.join_bytes([prefix, message], b""));
 }
 
 // The returned view retains the original frame and avoids a second copy of
@@ -110,13 +111,12 @@ pub fn grpc_message_reader(message: GrpcMessage, limits: Limits)
     if message.size > limits.max_message_bytes {
         return err("grpc message reader: message exceeds configured byte limit");
     }
-    let budget = Budget { values: 0, max_values: limits.max_values };
     return ok(Reader {
         data: message.wire,
         pos: message.offset,
         end: message.offset + message.size,
         depth: 0,
         limits: limits,
-        budget: budget
+        values: 0
     });
 }

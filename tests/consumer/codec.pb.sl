@@ -20,23 +20,24 @@ pub fn new_Address() -> Address {
 fn decode_Address_reader(reader: grpc.Reader) -> result[Address, str] {
     let out = new_Address();
     while true {
-        let tag_result = grpc.proto_reader_tag(reader);
-        guard let tag_opt = tag_result else let e = err_of(tag_result) { return err("protobuf tag: " + e); }
-        guard let tag = tag_opt else { break; }
-        switch tag.field_number {
+        let key_read = grpc.proto_reader_key(reader);
+        guard let key = key_read else let code = err_of(key_read) { return err("Address: protobuf key: " + grpc.proto_error_text(code)); }
+        if key == 0 { break; }
+        let wire = key & 7;
+        switch key >> 3 {
           case 1 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("Address.city: wrong protobuf wire type"); }
-            let f1_field_value_result = grpc.proto_reader_string(reader);
-            guard let field_value = f1_field_value_result else let e = err_of(f1_field_value_result) { return err("Address.city: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("Address.city: wrong protobuf wire type"); }
+            let f1_field_value_read = grpc.proto_reader_string_end(reader);
+            guard let f1_field_value_end = f1_field_value_read else let code = err_of(f1_field_value_read) { return err("Address.city: " + grpc.proto_error_text(code)); }
+            let field_value = grpc.proto_reader_take_string(reader, f1_field_value_end);
             out.city = field_value;
           }
           default {
-            let skipped = grpc.proto_reader_skip(reader, tag.wire_type);
-            guard let _skip = skipped else let e = err_of(skipped) { return err("unknown protobuf field: " + e); }
+            let skipped = grpc.proto_reader_skip(reader, wire);
+            guard let _skipped = skipped else let code = err_of(skipped) { return err("Address: unknown protobuf field: " + grpc.proto_error_text(code)); }
           }
         }
     }
-    if !grpc.proto_reader_done(reader) { return err("protobuf submessage was not fully consumed"); }
     return ok(out);
 }
 
@@ -47,15 +48,33 @@ pub fn decode_Address(raw: bytes, limits: grpc.Limits) -> result[Address, str] {
 }
 
 pub fn encode_Address(value: Address, limits: grpc.Limits) -> result[bytes, str] {
-    let writer_result = grpc.proto_writer(limits);
-    guard let writer = writer_result else let e = err_of(writer_result) { return err(e); }
-    if value.city != "" {
-        let tag_1_result = grpc.proto_writer_tag(writer, 1, grpc.PROTO_BYTES);
-        guard let _tag_1 = tag_1_result else let e = err_of(tag_1_result) { return err("Address.city: " + e); }
-        let write_1_city_result = grpc.proto_writer_string(writer, value.city);
-        guard let _write_1_city = write_1_city_result else let e = err_of(write_1_city_result) { return err("Address.city: " + e); }
-    }
+    if !grpc.proto_limits_valid(limits) { return err("grpc.proto writer: invalid limits"); }
+    let size = size_Address(value);
+    if size < 0 { return err(check_Address(value)); }
+    if size > limits.max_message_bytes { return err("grpc.proto writer: message exceeds configured byte limit"); }
+    let writer = grpc.proto_writer();
+    write_Address(writer, value);
     return ok(grpc.proto_writer_finish(writer));
+}
+
+fn size_Address(value: Address) -> int {
+    let n = 0;
+    if value.city != "" {
+        n = n + 1;
+        n = n + grpc.proto_size_delimited(len(value.city));
+    }
+    return n;
+}
+
+fn write_Address(w: grpc.Writer, value: Address) {
+    if value.city != "" {
+        grpc.proto_write_varint(w, 10);
+        grpc.proto_write_string(w, value.city);
+    }
+}
+
+fn check_Address(value: Address) -> str {
+    return "";
 }
 
 pub struct User {
@@ -111,249 +130,265 @@ pub fn new_User() -> User {
 fn decode_User_reader(reader: grpc.Reader) -> result[User, str] {
     let out = new_User();
     while true {
-        let tag_result = grpc.proto_reader_tag(reader);
-        guard let tag_opt = tag_result else let e = err_of(tag_result) { return err("protobuf tag: " + e); }
-        guard let tag = tag_opt else { break; }
-        switch tag.field_number {
+        let key_read = grpc.proto_reader_key(reader);
+        guard let key = key_read else let code = err_of(key_read) { return err("User: protobuf key: " + grpc.proto_error_text(code)); }
+        if key == 0 { break; }
+        let wire = key & 7;
+        switch key >> 3 {
           case 1 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.id: wrong protobuf wire type"); }
-            let f1_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f1_field_value_raw = f1_field_value_result else let e = err_of(f1_field_value_result) { return err("User.id: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.id: wrong protobuf wire type"); }
+            let f1_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f1_field_value_raw = f1_field_value_read else let code = err_of(f1_field_value_read) { return err("User.id: " + grpc.proto_error_text(code)); }
             if !grpc.proto_int32_wire_valid(f1_field_value_raw) { return err("User.id: int32 varint is outside the valid wire range"); }
             let field_value: int = grpc.proto_int32_from_wire(f1_field_value_raw);
             out.id = field_value;
           }
           case 2 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.score: wrong protobuf wire type"); }
-            let f2_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f2_field_value_raw = f2_field_value_result else let e = err_of(f2_field_value_result) { return err("User.score: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.score: wrong protobuf wire type"); }
+            let f2_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f2_field_value_raw = f2_field_value_read else let code = err_of(f2_field_value_read) { return err("User.score: " + grpc.proto_error_text(code)); }
             let field_value: int = grpc.proto_sint64_from_wire(f2_field_value_raw);
             out.score = field_value;
           }
           case 3 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.name: wrong protobuf wire type"); }
-            let f3_field_value_result = grpc.proto_reader_string(reader);
-            guard let field_value = f3_field_value_result else let e = err_of(f3_field_value_result) { return err("User.name: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("User.name: wrong protobuf wire type"); }
+            let f3_field_value_read = grpc.proto_reader_string_end(reader);
+            guard let f3_field_value_end = f3_field_value_read else let code = err_of(f3_field_value_read) { return err("User.name: " + grpc.proto_error_text(code)); }
+            let field_value = grpc.proto_reader_take_string(reader, f3_field_value_end);
             out.name = field_value;
           }
           case 4 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.avatar: wrong protobuf wire type"); }
-            let f4_field_value_result = grpc.proto_reader_bytes(reader);
-            guard let field_value = f4_field_value_result else let e = err_of(f4_field_value_result) { return err("User.avatar: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("User.avatar: wrong protobuf wire type"); }
+            let f4_field_value_read = grpc.proto_reader_open(reader);
+            guard let f4_field_value_end = f4_field_value_read else let code = err_of(f4_field_value_read) { return err("User.avatar: " + grpc.proto_error_text(code)); }
+            let field_value = grpc.proto_reader_take_bytes(reader, f4_field_value_end);
             out.avatar = field_value;
           }
           case 5 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.active: wrong protobuf wire type"); }
-            let f5_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f5_field_value_raw = f5_field_value_result else let e = err_of(f5_field_value_result) { return err("User.active: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.active: wrong protobuf wire type"); }
+            let f5_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f5_field_value_raw = f5_field_value_read else let code = err_of(f5_field_value_read) { return err("User.active: " + grpc.proto_error_text(code)); }
             let field_value: bool = f5_field_value_raw != 0;
             out.active = field_value;
           }
           case 6 {
-            if tag.wire_type != grpc.PROTO_FIXED32 { return err("User.ratio: wrong protobuf wire type"); }
-            let f6_field_value_result = grpc.proto_reader_float(reader);
-            guard let f6_field_value_raw = f6_field_value_result else let e = err_of(f6_field_value_result) { return err("User.ratio: " + e); }
+            if wire != grpc.PROTO_FIXED32 { return err("User.ratio: wrong protobuf wire type"); }
+            let f6_field_value_read = grpc.proto_reader_float(reader);
+            guard let f6_field_value_raw = f6_field_value_read else let code = err_of(f6_field_value_read) { return err("User.ratio: " + grpc.proto_error_text(code)); }
             let field_value: float = f6_field_value_raw;
             out.ratio = field_value;
           }
           case 7 {
-            if tag.wire_type != grpc.PROTO_FIXED64 { return err("User.balance: wrong protobuf wire type"); }
-            let f7_field_value_result = grpc.proto_reader_double(reader);
-            guard let f7_field_value_raw = f7_field_value_result else let e = err_of(f7_field_value_result) { return err("User.balance: " + e); }
+            if wire != grpc.PROTO_FIXED64 { return err("User.balance: wrong protobuf wire type"); }
+            let f7_field_value_read = grpc.proto_reader_double(reader);
+            guard let f7_field_value_raw = f7_field_value_read else let code = err_of(f7_field_value_read) { return err("User.balance: " + grpc.proto_error_text(code)); }
             let field_value: float = f7_field_value_raw;
             out.balance = field_value;
           }
           case 8 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.color: wrong protobuf wire type"); }
-            let f8_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f8_field_value_raw = f8_field_value_result else let e = err_of(f8_field_value_result) { return err("User.color: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.color: wrong protobuf wire type"); }
+            let f8_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f8_field_value_raw = f8_field_value_read else let code = err_of(f8_field_value_read) { return err("User.color: " + grpc.proto_error_text(code)); }
             if !grpc.proto_int32_wire_valid(f8_field_value_raw) { return err("User.color: int32 varint is outside the valid wire range"); }
             let field_value: int = grpc.proto_int32_from_wire(f8_field_value_raw);
             out.color = field_value;
           }
           case 9 {
-            if tag.wire_type == grpc.PROTO_BYTES {
-                let packed_result = grpc.proto_reader_packed(reader);
-                guard let packed = packed_result else let e = err_of(packed_result) { return err("User.nums: " + e); }
-                while !grpc.proto_reader_done(packed) {
-                    let charged = grpc.proto_reader_charge(packed);
-                    guard let _charged = charged else let e = err_of(charged) { return err("User.nums: " + e); }
-                    let f9_packed_value_result = grpc.proto_reader_varint(packed);
-                    guard let f9_packed_value_raw = f9_packed_value_result else let e = err_of(f9_packed_value_result) { return err("User.nums: " + e); }
+            if wire == grpc.PROTO_BYTES {
+                let f9_packed_read = grpc.proto_reader_enter_packed(reader);
+                guard let f9_packed_outer = f9_packed_read else let code = err_of(f9_packed_read) { return err("User.nums: " + grpc.proto_error_text(code)); }
+                while !grpc.proto_reader_done(reader) {
+                    let f9_packed_charged = grpc.proto_reader_charge(reader);
+                    guard let _f9_packed_charged = f9_packed_charged else let code = err_of(f9_packed_charged) { return err("User.nums: " + grpc.proto_error_text(code)); }
+                    let f9_packed_value_read = grpc.proto_reader_varint(reader);
+                    guard let f9_packed_value_raw = f9_packed_value_read else let code = err_of(f9_packed_value_read) { return err("User.nums: " + grpc.proto_error_text(code)); }
                     if f9_packed_value_raw > 4294967295 { return err("User.nums: uint32 value exceeds 4294967295"); }
                     let packed_value: u32 = f9_packed_value_raw as u32;
                     push(out.nums, packed_value);
                 }
+                let f9_packed_left = grpc.proto_reader_leave_packed(reader, f9_packed_outer);
+                guard let _f9_packed_left = f9_packed_left else let code = err_of(f9_packed_left) { return err("User.nums: " + grpc.proto_error_text(code)); }
             } else {
-                if tag.wire_type != grpc.PROTO_VARINT { return err("User.nums: wrong protobuf wire type"); }
-                let f9_field_value_result = grpc.proto_reader_varint(reader);
-                guard let f9_field_value_raw = f9_field_value_result else let e = err_of(f9_field_value_result) { return err("User.nums: " + e); }
+                if wire != grpc.PROTO_VARINT { return err("User.nums: wrong protobuf wire type"); }
+                let f9_field_value_read = grpc.proto_reader_varint(reader);
+                guard let f9_field_value_raw = f9_field_value_read else let code = err_of(f9_field_value_read) { return err("User.nums: " + grpc.proto_error_text(code)); }
                 if f9_field_value_raw > 4294967295 { return err("User.nums: uint32 value exceeds 4294967295"); }
                 let field_value: u32 = f9_field_value_raw as u32;
                 push(out.nums, field_value);
             }
           }
           case 10 {
-            if tag.wire_type == grpc.PROTO_BYTES {
-                let packed_result = grpc.proto_reader_packed(reader);
-                guard let packed = packed_result else let e = err_of(packed_result) { return err("User.old_nums: " + e); }
-                while !grpc.proto_reader_done(packed) {
-                    let charged = grpc.proto_reader_charge(packed);
-                    guard let _charged = charged else let e = err_of(charged) { return err("User.old_nums: " + e); }
-                    let f10_packed_value_result = grpc.proto_reader_varint(packed);
-                    guard let f10_packed_value_raw = f10_packed_value_result else let e = err_of(f10_packed_value_result) { return err("User.old_nums: " + e); }
+            if wire == grpc.PROTO_BYTES {
+                let f10_packed_read = grpc.proto_reader_enter_packed(reader);
+                guard let f10_packed_outer = f10_packed_read else let code = err_of(f10_packed_read) { return err("User.old_nums: " + grpc.proto_error_text(code)); }
+                while !grpc.proto_reader_done(reader) {
+                    let f10_packed_charged = grpc.proto_reader_charge(reader);
+                    guard let _f10_packed_charged = f10_packed_charged else let code = err_of(f10_packed_charged) { return err("User.old_nums: " + grpc.proto_error_text(code)); }
+                    let f10_packed_value_read = grpc.proto_reader_varint(reader);
+                    guard let f10_packed_value_raw = f10_packed_value_read else let code = err_of(f10_packed_value_read) { return err("User.old_nums: " + grpc.proto_error_text(code)); }
                     if !grpc.proto_int32_wire_valid(f10_packed_value_raw) { return err("User.old_nums: int32 varint is outside the valid wire range"); }
                     let packed_value: int = grpc.proto_int32_from_wire(f10_packed_value_raw);
                     push(out.old_nums, packed_value);
                 }
+                let f10_packed_left = grpc.proto_reader_leave_packed(reader, f10_packed_outer);
+                guard let _f10_packed_left = f10_packed_left else let code = err_of(f10_packed_left) { return err("User.old_nums: " + grpc.proto_error_text(code)); }
             } else {
-                if tag.wire_type != grpc.PROTO_VARINT { return err("User.old_nums: wrong protobuf wire type"); }
-                let f10_field_value_result = grpc.proto_reader_varint(reader);
-                guard let f10_field_value_raw = f10_field_value_result else let e = err_of(f10_field_value_result) { return err("User.old_nums: " + e); }
+                if wire != grpc.PROTO_VARINT { return err("User.old_nums: wrong protobuf wire type"); }
+                let f10_field_value_read = grpc.proto_reader_varint(reader);
+                guard let f10_field_value_raw = f10_field_value_read else let code = err_of(f10_field_value_read) { return err("User.old_nums: " + grpc.proto_error_text(code)); }
                 if !grpc.proto_int32_wire_valid(f10_field_value_raw) { return err("User.old_nums: int32 varint is outside the valid wire range"); }
                 let field_value: int = grpc.proto_int32_from_wire(f10_field_value_raw);
                 push(out.old_nums, field_value);
             }
           }
           case 11 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.address: wrong protobuf wire type"); }
-            let f11_field_value_sub_result = grpc.proto_reader_submessage(reader);
-            guard let f11_field_value_sub = f11_field_value_sub_result else let e = err_of(f11_field_value_sub_result) { return err("User.address: " + e); }
-            let f11_field_value_result = decode_Address_reader(f11_field_value_sub);
+            if wire != grpc.PROTO_BYTES { return err("User.address: wrong protobuf wire type"); }
+            let f11_field_value_enter = grpc.proto_reader_enter(reader);
+            guard let f11_field_value_outer = f11_field_value_enter else let code = err_of(f11_field_value_enter) { return err("User.address: " + grpc.proto_error_text(code)); }
+            let f11_field_value_result = decode_Address_reader(reader);
             guard let field_value = f11_field_value_result else let e = err_of(f11_field_value_result) { return err("User.address: " + e); }
+            let f11_field_value_leave = grpc.proto_reader_leave(reader, f11_field_value_outer);
+            guard let _f11_field_value_left = f11_field_value_leave else let code = err_of(f11_field_value_leave) { return err("User.address: " + grpc.proto_error_text(code)); }
             out.address = some(field_value);
           }
           case 12 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.nickname: wrong protobuf wire type"); }
-            let f12_field_value_result = grpc.proto_reader_string(reader);
-            guard let field_value = f12_field_value_result else let e = err_of(f12_field_value_result) { return err("User.nickname: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("User.nickname: wrong protobuf wire type"); }
+            let f12_field_value_read = grpc.proto_reader_string_end(reader);
+            guard let f12_field_value_end = f12_field_value_read else let code = err_of(f12_field_value_read) { return err("User.nickname: " + grpc.proto_error_text(code)); }
+            let field_value = grpc.proto_reader_take_string(reader, f12_field_value_end);
             out.nickname = some(field_value);
           }
           case 13 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.labels: wrong protobuf wire type"); }
-            let map_13_result = grpc.proto_reader_submessage(reader);
-            guard let map_13_reader = map_13_result else let e = err_of(map_13_result) { return err("User.labels: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("User.labels: wrong protobuf wire type"); }
+            let map_13_enter = grpc.proto_reader_enter(reader);
+            guard let map_13_outer = map_13_enter else let code = err_of(map_13_enter) { return err("User.labels: " + grpc.proto_error_text(code)); }
             let map_13_key: str = "";
             let map_13_value: int = 0;
             while true {
-                let map_13_tag_result = grpc.proto_reader_tag(map_13_reader);
-                guard let map_13_tag_opt = map_13_tag_result else let e = err_of(map_13_tag_result) { return err("User.labels map entry: " + e); }
-                guard let map_13_tag = map_13_tag_opt else { break; }
-                switch map_13_tag.field_number {
+                let map_13_key_read = grpc.proto_reader_key(reader);
+                guard let map_13_k = map_13_key_read else let code = err_of(map_13_key_read) { return err("User.labels map entry: " + grpc.proto_error_text(code)); }
+                if map_13_k == 0 { break; }
+                switch map_13_k >> 3 {
                   case 1 {
-                    if map_13_tag.wire_type != grpc.PROTO_BYTES { return err("User.labels map entry: wrong map entry wire type"); }
-                    let f1_map_13_key_read_result = grpc.proto_reader_string(map_13_reader);
-                    guard let map_13_key_read = f1_map_13_key_read_result else let e = err_of(f1_map_13_key_read_result) { return err("User.labels map entry: " + e); }
+                    if (map_13_k & 7) != grpc.PROTO_BYTES { return err("User.labels map entry: wrong map entry wire type"); }
+                    let f1_map_13_key_read_read = grpc.proto_reader_string_end(reader);
+                    guard let f1_map_13_key_read_end = f1_map_13_key_read_read else let code = err_of(f1_map_13_key_read_read) { return err("User.labels map entry: " + grpc.proto_error_text(code)); }
+                    let map_13_key_read = grpc.proto_reader_take_string(reader, f1_map_13_key_read_end);
                     map_13_key = map_13_key_read;
                   }
                   case 2 {
-                    if map_13_tag.wire_type != grpc.PROTO_VARINT { return err("User.labels map entry: wrong map entry wire type"); }
-                    let f2_map_13_value_read_result = grpc.proto_reader_varint(map_13_reader);
-                    guard let f2_map_13_value_read_raw = f2_map_13_value_read_result else let e = err_of(f2_map_13_value_read_result) { return err("User.labels map entry: " + e); }
+                    if (map_13_k & 7) != grpc.PROTO_VARINT { return err("User.labels map entry: wrong map entry wire type"); }
+                    let f2_map_13_value_read_read = grpc.proto_reader_varint(reader);
+                    guard let f2_map_13_value_read_raw = f2_map_13_value_read_read else let code = err_of(f2_map_13_value_read_read) { return err("User.labels map entry: " + grpc.proto_error_text(code)); }
                     if !grpc.proto_int32_wire_valid(f2_map_13_value_read_raw) { return err("User.labels map entry: int32 varint is outside the valid wire range"); }
                     let map_13_value_read: int = grpc.proto_int32_from_wire(f2_map_13_value_read_raw);
                     map_13_value = map_13_value_read;
                   }
                   default {
-                    let map_13_skip = grpc.proto_reader_skip(map_13_reader, map_13_tag.wire_type);
-                    guard let _map_13_skip = map_13_skip else let e = err_of(map_13_skip) { return err("User.labels map entry: " + e); }
+                    let map_13_skip = grpc.proto_reader_skip(reader, map_13_k & 7);
+                    guard let _map_13_skipped = map_13_skip else let code = err_of(map_13_skip) { return err("User.labels map entry: " + grpc.proto_error_text(code)); }
                   }
                 }
             }
+            let map_13_leave = grpc.proto_reader_leave(reader, map_13_outer);
+            guard let _map_13_left = map_13_leave else let code = err_of(map_13_leave) { return err("User.labels: " + grpc.proto_error_text(code)); }
             out.labels[map_13_key] = map_13_value;
           }
           case 14 {
-            if tag.wire_type != grpc.PROTO_BYTES { return err("User.offices: wrong protobuf wire type"); }
-            let map_14_result = grpc.proto_reader_submessage(reader);
-            guard let map_14_reader = map_14_result else let e = err_of(map_14_result) { return err("User.offices: " + e); }
+            if wire != grpc.PROTO_BYTES { return err("User.offices: wrong protobuf wire type"); }
+            let map_14_enter = grpc.proto_reader_enter(reader);
+            guard let map_14_outer = map_14_enter else let code = err_of(map_14_enter) { return err("User.offices: " + grpc.proto_error_text(code)); }
             let map_14_key: int = 0;
             let map_14_value: Address = new_Address();
             while true {
-                let map_14_tag_result = grpc.proto_reader_tag(map_14_reader);
-                guard let map_14_tag_opt = map_14_tag_result else let e = err_of(map_14_tag_result) { return err("User.offices map entry: " + e); }
-                guard let map_14_tag = map_14_tag_opt else { break; }
-                switch map_14_tag.field_number {
+                let map_14_key_read = grpc.proto_reader_key(reader);
+                guard let map_14_k = map_14_key_read else let code = err_of(map_14_key_read) { return err("User.offices map entry: " + grpc.proto_error_text(code)); }
+                if map_14_k == 0 { break; }
+                switch map_14_k >> 3 {
                   case 1 {
-                    if map_14_tag.wire_type != grpc.PROTO_VARINT { return err("User.offices map entry: wrong map entry wire type"); }
-                    let f1_map_14_key_read_result = grpc.proto_reader_varint(map_14_reader);
-                    guard let f1_map_14_key_read_raw = f1_map_14_key_read_result else let e = err_of(f1_map_14_key_read_result) { return err("User.offices map entry: " + e); }
+                    if (map_14_k & 7) != grpc.PROTO_VARINT { return err("User.offices map entry: wrong map entry wire type"); }
+                    let f1_map_14_key_read_read = grpc.proto_reader_varint(reader);
+                    guard let f1_map_14_key_read_raw = f1_map_14_key_read_read else let code = err_of(f1_map_14_key_read_read) { return err("User.offices map entry: " + grpc.proto_error_text(code)); }
                     let map_14_key_read: int = f1_map_14_key_read_raw as int;
                     map_14_key = map_14_key_read;
                   }
                   case 2 {
-                    if map_14_tag.wire_type != grpc.PROTO_BYTES { return err("User.offices map entry: wrong map entry wire type"); }
-                    let f2_map_14_value_read_sub_result = grpc.proto_reader_submessage(map_14_reader);
-                    guard let f2_map_14_value_read_sub = f2_map_14_value_read_sub_result else let e = err_of(f2_map_14_value_read_sub_result) { return err("User.offices map entry: " + e); }
-                    let f2_map_14_value_read_result = decode_Address_reader(f2_map_14_value_read_sub);
+                    if (map_14_k & 7) != grpc.PROTO_BYTES { return err("User.offices map entry: wrong map entry wire type"); }
+                    let f2_map_14_value_read_enter = grpc.proto_reader_enter(reader);
+                    guard let f2_map_14_value_read_outer = f2_map_14_value_read_enter else let code = err_of(f2_map_14_value_read_enter) { return err("User.offices map entry: " + grpc.proto_error_text(code)); }
+                    let f2_map_14_value_read_result = decode_Address_reader(reader);
                     guard let map_14_value_read = f2_map_14_value_read_result else let e = err_of(f2_map_14_value_read_result) { return err("User.offices map entry: " + e); }
+                    let f2_map_14_value_read_leave = grpc.proto_reader_leave(reader, f2_map_14_value_read_outer);
+                    guard let _f2_map_14_value_read_left = f2_map_14_value_read_leave else let code = err_of(f2_map_14_value_read_leave) { return err("User.offices map entry: " + grpc.proto_error_text(code)); }
                     map_14_value = map_14_value_read;
                   }
                   default {
-                    let map_14_skip = grpc.proto_reader_skip(map_14_reader, map_14_tag.wire_type);
-                    guard let _map_14_skip = map_14_skip else let e = err_of(map_14_skip) { return err("User.offices map entry: " + e); }
+                    let map_14_skip = grpc.proto_reader_skip(reader, map_14_k & 7);
+                    guard let _map_14_skipped = map_14_skip else let code = err_of(map_14_skip) { return err("User.offices map entry: " + grpc.proto_error_text(code)); }
                   }
                 }
             }
+            let map_14_leave = grpc.proto_reader_leave(reader, map_14_outer);
+            guard let _map_14_left = map_14_leave else let code = err_of(map_14_leave) { return err("User.offices: " + grpc.proto_error_text(code)); }
             out.offices[map_14_key] = map_14_value;
           }
           case 15 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.unsigned_count: wrong protobuf wire type"); }
-            let f15_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f15_field_value_raw = f15_field_value_result else let e = err_of(f15_field_value_result) { return err("User.unsigned_count: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.unsigned_count: wrong protobuf wire type"); }
+            let f15_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f15_field_value_raw = f15_field_value_read else let code = err_of(f15_field_value_read) { return err("User.unsigned_count: " + grpc.proto_error_text(code)); }
             if f15_field_value_raw > 4294967295 { return err("User.unsigned_count: uint32 value exceeds 4294967295"); }
             let field_value: u32 = f15_field_value_raw as u32;
             out.unsigned_count = field_value;
           }
           case 16 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.unsigned_total: wrong protobuf wire type"); }
-            let f16_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f16_field_value_raw = f16_field_value_result else let e = err_of(f16_field_value_result) { return err("User.unsigned_total: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.unsigned_total: wrong protobuf wire type"); }
+            let f16_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f16_field_value_raw = f16_field_value_read else let code = err_of(f16_field_value_read) { return err("User.unsigned_total: " + grpc.proto_error_text(code)); }
             let field_value: u64 = f16_field_value_raw;
             out.unsigned_total = field_value;
           }
           case 17 {
-            if tag.wire_type != grpc.PROTO_VARINT { return err("User.signed_delta: wrong protobuf wire type"); }
-            let f17_field_value_result = grpc.proto_reader_varint(reader);
-            guard let f17_field_value_raw = f17_field_value_result else let e = err_of(f17_field_value_result) { return err("User.signed_delta: " + e); }
+            if wire != grpc.PROTO_VARINT { return err("User.signed_delta: wrong protobuf wire type"); }
+            let f17_field_value_read = grpc.proto_reader_varint(reader);
+            guard let f17_field_value_raw = f17_field_value_read else let code = err_of(f17_field_value_read) { return err("User.signed_delta: " + grpc.proto_error_text(code)); }
             if f17_field_value_raw > 4294967295 { return err("User.signed_delta: sint32 value exceeds 4294967295"); }
             let field_value: int = grpc.proto_sint32_from_wire(f17_field_value_raw);
             out.signed_delta = field_value;
           }
           case 18 {
-            if tag.wire_type != grpc.PROTO_FIXED32 { return err("User.fixed_count: wrong protobuf wire type"); }
-            let f18_field_value_result = grpc.proto_reader_fixed32(reader);
-            guard let f18_field_value_raw = f18_field_value_result else let e = err_of(f18_field_value_result) { return err("User.fixed_count: " + e); }
+            if wire != grpc.PROTO_FIXED32 { return err("User.fixed_count: wrong protobuf wire type"); }
+            let f18_field_value_read = grpc.proto_reader_fixed32(reader);
+            guard let f18_field_value_raw = f18_field_value_read else let code = err_of(f18_field_value_read) { return err("User.fixed_count: " + grpc.proto_error_text(code)); }
             let field_value: u32 = f18_field_value_raw;
             out.fixed_count = field_value;
           }
           case 19 {
-            if tag.wire_type != grpc.PROTO_FIXED64 { return err("User.fixed_total: wrong protobuf wire type"); }
-            let f19_field_value_result = grpc.proto_reader_fixed64(reader);
-            guard let f19_field_value_raw = f19_field_value_result else let e = err_of(f19_field_value_result) { return err("User.fixed_total: " + e); }
+            if wire != grpc.PROTO_FIXED64 { return err("User.fixed_total: wrong protobuf wire type"); }
+            let f19_field_value_read = grpc.proto_reader_fixed64(reader);
+            guard let f19_field_value_raw = f19_field_value_read else let code = err_of(f19_field_value_read) { return err("User.fixed_total: " + grpc.proto_error_text(code)); }
             let field_value: u64 = f19_field_value_raw;
             out.fixed_total = field_value;
           }
           case 20 {
-            if tag.wire_type != grpc.PROTO_FIXED32 { return err("User.signed_fixed: wrong protobuf wire type"); }
-            let f20_field_value_result = grpc.proto_reader_fixed32(reader);
-            guard let f20_field_value_raw = f20_field_value_result else let e = err_of(f20_field_value_result) { return err("User.signed_fixed: " + e); }
+            if wire != grpc.PROTO_FIXED32 { return err("User.signed_fixed: wrong protobuf wire type"); }
+            let f20_field_value_read = grpc.proto_reader_fixed32(reader);
+            guard let f20_field_value_raw = f20_field_value_read else let code = err_of(f20_field_value_read) { return err("User.signed_fixed: " + grpc.proto_error_text(code)); }
             let field_value: int = (f20_field_value_raw as i32) as int;
             out.signed_fixed = field_value;
           }
           case 21 {
-            if tag.wire_type != grpc.PROTO_FIXED64 { return err("User.signed_fixed_total: wrong protobuf wire type"); }
-            let f21_field_value_result = grpc.proto_reader_fixed64(reader);
-            guard let f21_field_value_raw = f21_field_value_result else let e = err_of(f21_field_value_result) { return err("User.signed_fixed_total: " + e); }
+            if wire != grpc.PROTO_FIXED64 { return err("User.signed_fixed_total: wrong protobuf wire type"); }
+            let f21_field_value_read = grpc.proto_reader_fixed64(reader);
+            guard let f21_field_value_raw = f21_field_value_read else let code = err_of(f21_field_value_read) { return err("User.signed_fixed_total: " + grpc.proto_error_text(code)); }
             let field_value: int = f21_field_value_raw as int;
             out.signed_fixed_total = field_value;
           }
           default {
-            let skipped = grpc.proto_reader_skip(reader, tag.wire_type);
-            guard let _skip = skipped else let e = err_of(skipped) { return err("unknown protobuf field: " + e); }
+            let skipped = grpc.proto_reader_skip(reader, wire);
+            guard let _skipped = skipped else let code = err_of(skipped) { return err("User: unknown protobuf field: " + grpc.proto_error_text(code)); }
           }
         }
     }
-    if !grpc.proto_reader_done(reader) { return err("protobuf submessage was not fully consumed"); }
     return ok(out);
 }
 
@@ -364,182 +399,278 @@ pub fn decode_User(raw: bytes, limits: grpc.Limits) -> result[User, str] {
 }
 
 pub fn encode_User(value: User, limits: grpc.Limits) -> result[bytes, str] {
-    let writer_result = grpc.proto_writer(limits);
-    guard let writer = writer_result else let e = err_of(writer_result) { return err(e); }
+    if !grpc.proto_limits_valid(limits) { return err("grpc.proto writer: invalid limits"); }
+    let size = size_User(value);
+    if size < 0 { return err(check_User(value)); }
+    if size > limits.max_message_bytes { return err("grpc.proto writer: message exceeds configured byte limit"); }
+    let writer = grpc.proto_writer();
+    write_User(writer, value);
+    return ok(grpc.proto_writer_finish(writer));
+}
+
+fn size_User(value: User) -> int {
+    let n = 0;
     if value.id != 0 {
-        let tag_1_result = grpc.proto_writer_tag(writer, 1, grpc.PROTO_VARINT);
-        guard let _tag_1 = tag_1_result else let e = err_of(tag_1_result) { return err("User.id: " + e); }
-        if value.id < -2147483648 || value.id > 2147483647 { return err("User.id: value is outside int32 range"); }
-        let write_1_id_result = grpc.proto_writer_varint(writer, grpc.proto_int32_to_wire(value.id));
-        guard let _write_1_id = write_1_id_result else let e = err_of(write_1_id_result) { return err("User.id: " + e); }
+        n = n + 1;
+        if !grpc.proto_int32_in_range(value.id) { return -1; }
+        n = n + grpc.proto_size_varint(grpc.proto_int32_to_wire(value.id));
     }
     if value.score != 0 {
-        let tag_2_result = grpc.proto_writer_tag(writer, 2, grpc.PROTO_VARINT);
-        guard let _tag_2 = tag_2_result else let e = err_of(tag_2_result) { return err("User.score: " + e); }
-        let write_2_score_result = grpc.proto_writer_varint(writer, grpc.proto_sint64_to_wire(value.score));
-        guard let _write_2_score = write_2_score_result else let e = err_of(write_2_score_result) { return err("User.score: " + e); }
+        n = n + 1;
+        n = n + grpc.proto_size_varint(grpc.proto_sint64_to_wire(value.score));
     }
     if value.name != "" {
-        let tag_3_result = grpc.proto_writer_tag(writer, 3, grpc.PROTO_BYTES);
-        guard let _tag_3 = tag_3_result else let e = err_of(tag_3_result) { return err("User.name: " + e); }
-        let write_3_name_result = grpc.proto_writer_string(writer, value.name);
-        guard let _write_3_name = write_3_name_result else let e = err_of(write_3_name_result) { return err("User.name: " + e); }
+        n = n + 1;
+        n = n + grpc.proto_size_delimited(len(value.name));
     }
     if value.avatar != b"" {
-        let tag_4_result = grpc.proto_writer_tag(writer, 4, grpc.PROTO_BYTES);
-        guard let _tag_4 = tag_4_result else let e = err_of(tag_4_result) { return err("User.avatar: " + e); }
-        let write_4_avatar_result = grpc.proto_writer_bytes(writer, value.avatar);
-        guard let _write_4_avatar = write_4_avatar_result else let e = err_of(write_4_avatar_result) { return err("User.avatar: " + e); }
+        n = n + 1;
+        n = n + grpc.proto_size_delimited(len(value.avatar));
     }
     if value.active != false {
-        let tag_5_result = grpc.proto_writer_tag(writer, 5, grpc.PROTO_VARINT);
-        guard let _tag_5 = tag_5_result else let e = err_of(tag_5_result) { return err("User.active: " + e); }
-        let write_5_active_raw: u64 = 0;
-        if value.active { write_5_active_raw = 1; }
-        let write_5_active_result = grpc.proto_writer_varint(writer, write_5_active_raw);
-        guard let _write_5_active = write_5_active_result else let e = err_of(write_5_active_result) { return err("User.active: " + e); }
+        n = n + 1;
+        n = n + 1;
     }
     if value.ratio != 0.0 {
-        let tag_6_result = grpc.proto_writer_tag(writer, 6, grpc.PROTO_FIXED32);
-        guard let _tag_6 = tag_6_result else let e = err_of(tag_6_result) { return err("User.ratio: " + e); }
-        let write_6_ratio_result = grpc.proto_writer_float(writer, value.ratio);
-        guard let _write_6_ratio = write_6_ratio_result else let e = err_of(write_6_ratio_result) { return err("User.ratio: " + e); }
+        n = n + 1;
+        n = n + 4;
     }
     if value.balance != 0.0 {
-        let tag_7_result = grpc.proto_writer_tag(writer, 7, grpc.PROTO_FIXED64);
-        guard let _tag_7 = tag_7_result else let e = err_of(tag_7_result) { return err("User.balance: " + e); }
-        let write_7_balance_result = grpc.proto_writer_double(writer, value.balance);
-        guard let _write_7_balance = write_7_balance_result else let e = err_of(write_7_balance_result) { return err("User.balance: " + e); }
+        n = n + 1;
+        n = n + 8;
     }
     if value.color != 0 {
-        let tag_8_result = grpc.proto_writer_tag(writer, 8, grpc.PROTO_VARINT);
-        guard let _tag_8 = tag_8_result else let e = err_of(tag_8_result) { return err("User.color: " + e); }
-        if value.color < -2147483648 || value.color > 2147483647 { return err("User.color: value is outside int32 range"); }
-        let write_8_color_result = grpc.proto_writer_varint(writer, grpc.proto_int32_to_wire(value.color));
-        guard let _write_8_color = write_8_color_result else let e = err_of(write_8_color_result) { return err("User.color: " + e); }
+        n = n + 1;
+        if !grpc.proto_int32_in_range(value.color) { return -1; }
+        n = n + grpc.proto_size_varint(grpc.proto_int32_to_wire(value.color));
     }
     if len(value.nums) > 0 {
-        let packed_result = grpc.proto_writer(limits);
-        guard let packed = packed_result else let e = err_of(packed_result) { return err(e); }
+        let packed = 0;
         for item in value.nums {
-            let write_9_nums_result = grpc.proto_writer_varint(packed, item as u64);
-            guard let _write_9_nums = write_9_nums_result else let e = err_of(write_9_nums_result) { return err("User.nums: " + e); }
+            packed = packed + grpc.proto_size_varint(item as u64);
         }
-        let packed_bytes = grpc.proto_writer_finish(packed);
-        let tag_9_result = grpc.proto_writer_tag(writer, 9, grpc.PROTO_BYTES);
-        guard let _tag_9 = tag_9_result else let e = err_of(tag_9_result) { return err("User.nums: " + e); }
-        let write_packed_9_result = grpc.proto_writer_bytes(writer, packed_bytes);
-        guard let _write_packed_9 = write_packed_9_result else let e = err_of(write_packed_9_result) { return err("User.nums: " + e); }
+        n = n + 1 + grpc.proto_size_delimited(packed);
     }
     for item in value.old_nums {
-        let tag_10_result = grpc.proto_writer_tag(writer, 10, grpc.PROTO_VARINT);
-        guard let _tag_10 = tag_10_result else let e = err_of(tag_10_result) { return err("User.old_nums: " + e); }
-        if item < -2147483648 || item > 2147483647 { return err("User.old_nums: value is outside int32 range"); }
-        let write_10_old_nums_result = grpc.proto_writer_varint(writer, grpc.proto_int32_to_wire(item));
-        guard let _write_10_old_nums = write_10_old_nums_result else let e = err_of(write_10_old_nums_result) { return err("User.old_nums: " + e); }
+        n = n + 1;
+        if !grpc.proto_int32_in_range(item) { return -1; }
+        n = n + grpc.proto_size_varint(grpc.proto_int32_to_wire(item));
     }
     if let item = value.address {
-        let tag_11_result = grpc.proto_writer_tag(writer, 11, grpc.PROTO_BYTES);
-        guard let _tag_11 = tag_11_result else let e = err_of(tag_11_result) { return err("User.address: " + e); }
-        let write_11_address_message_result = encode_Address(item, limits);
-        guard let write_11_address_message = write_11_address_message_result else let e = err_of(write_11_address_message_result) { return err("User.address: " + e); }
-        let write_11_address_result = grpc.proto_writer_bytes(writer, write_11_address_message);
-        guard let _write_11_address = write_11_address_result else let e = err_of(write_11_address_result) { return err("User.address: " + e); }
+        n = n + 1;
+        let size_11 = size_Address(item);
+        if size_11 < 0 { return -1; }
+        n = n + grpc.proto_size_delimited(size_11);
     }
     if let item = value.nickname {
-        let tag_12_result = grpc.proto_writer_tag(writer, 12, grpc.PROTO_BYTES);
-        guard let _tag_12 = tag_12_result else let e = err_of(tag_12_result) { return err("User.nickname: " + e); }
-        let write_12_nickname_result = grpc.proto_writer_string(writer, item);
-        guard let _write_12_nickname = write_12_nickname_result else let e = err_of(write_12_nickname_result) { return err("User.nickname: " + e); }
+        n = n + 1;
+        n = n + grpc.proto_size_delimited(len(item));
     }
     for map_key, map_value in value.labels {
-        let map_entry_13_result = grpc.proto_writer(limits);
-        guard let map_entry_13 = map_entry_13_result else let e = err_of(map_entry_13_result) { return err(e); }
+        let entry = 0;
         if map_key != "" {
-            let map_entry_13_key_tag_result = grpc.proto_writer_tag(map_entry_13, 1, grpc.PROTO_BYTES);
-            guard let _map_entry_13_key_tag = map_entry_13_key_tag_result else let e = err_of(map_entry_13_key_tag_result) { return err("User.labels map key: " + e); }
-            let write_1_key_result = grpc.proto_writer_string(map_entry_13, map_key);
-            guard let _write_1_key = write_1_key_result else let e = err_of(write_1_key_result) { return err("User.labels map key: " + e); }
+            entry = entry + 1;
+            entry = entry + grpc.proto_size_delimited(len(map_key));
         }
         if map_value != 0 {
-            let map_entry_13_value_tag_result = grpc.proto_writer_tag(map_entry_13, 2, grpc.PROTO_VARINT);
-            guard let _map_entry_13_value_tag = map_entry_13_value_tag_result else let e = err_of(map_entry_13_value_tag_result) { return err("User.labels map value: " + e); }
-            if map_value < -2147483648 || map_value > 2147483647 { return err("User.labels map value: value is outside int32 range"); }
-            let write_2_value_result = grpc.proto_writer_varint(map_entry_13, grpc.proto_int32_to_wire(map_value));
-            guard let _write_2_value = write_2_value_result else let e = err_of(write_2_value_result) { return err("User.labels map value: " + e); }
+            entry = entry + 1;
+            if !grpc.proto_int32_in_range(map_value) { return -1; }
+            entry = entry + grpc.proto_size_varint(grpc.proto_int32_to_wire(map_value));
         }
-        let map_entry_13_bytes = grpc.proto_writer_finish(map_entry_13);
-        let tag_13_result = grpc.proto_writer_tag(writer, 13, grpc.PROTO_BYTES);
-        guard let _tag_13 = tag_13_result else let e = err_of(tag_13_result) { return err("User.labels: " + e); }
-        let map_entry_13_outer_result = grpc.proto_writer_bytes(writer, map_entry_13_bytes);
-        guard let _map_entry_13_outer = map_entry_13_outer_result else let e = err_of(map_entry_13_outer_result) { return err("User.labels: " + e); }
+        n = n + 1 + grpc.proto_size_delimited(entry);
     }
     for map_key, map_value in value.offices {
-        let map_entry_14_result = grpc.proto_writer(limits);
-        guard let map_entry_14 = map_entry_14_result else let e = err_of(map_entry_14_result) { return err(e); }
+        let entry = 0;
         if map_key != 0 {
-            let map_entry_14_key_tag_result = grpc.proto_writer_tag(map_entry_14, 1, grpc.PROTO_VARINT);
-            guard let _map_entry_14_key_tag = map_entry_14_key_tag_result else let e = err_of(map_entry_14_key_tag_result) { return err("User.offices map key: " + e); }
-            let write_1_key_result = grpc.proto_writer_varint(map_entry_14, map_key as u64);
-            guard let _write_1_key = write_1_key_result else let e = err_of(write_1_key_result) { return err("User.offices map key: " + e); }
+            entry = entry + 1;
+            entry = entry + grpc.proto_size_varint(map_key as u64);
         }
-        let map_entry_14_value_tag_result = grpc.proto_writer_tag(map_entry_14, 2, grpc.PROTO_BYTES);
-        guard let _map_entry_14_value_tag = map_entry_14_value_tag_result else let e = err_of(map_entry_14_value_tag_result) { return err("User.offices map value: " + e); }
-        let write_2_value_message_result = encode_Address(map_value, limits);
-        guard let write_2_value_message = write_2_value_message_result else let e = err_of(write_2_value_message_result) { return err("User.offices map value: " + e); }
-        let write_2_value_result = grpc.proto_writer_bytes(map_entry_14, write_2_value_message);
-        guard let _write_2_value = write_2_value_result else let e = err_of(write_2_value_result) { return err("User.offices map value: " + e); }
-        let map_entry_14_bytes = grpc.proto_writer_finish(map_entry_14);
-        let tag_14_result = grpc.proto_writer_tag(writer, 14, grpc.PROTO_BYTES);
-        guard let _tag_14 = tag_14_result else let e = err_of(tag_14_result) { return err("User.offices: " + e); }
-        let map_entry_14_outer_result = grpc.proto_writer_bytes(writer, map_entry_14_bytes);
-        guard let _map_entry_14_outer = map_entry_14_outer_result else let e = err_of(map_entry_14_outer_result) { return err("User.offices: " + e); }
+        entry = entry + 1;
+        let size_14 = size_Address(map_value);
+        if size_14 < 0 { return -1; }
+        entry = entry + grpc.proto_size_delimited(size_14);
+        n = n + 1 + grpc.proto_size_delimited(entry);
     }
     if value.unsigned_count != 0 {
-        let tag_15_result = grpc.proto_writer_tag(writer, 15, grpc.PROTO_VARINT);
-        guard let _tag_15 = tag_15_result else let e = err_of(tag_15_result) { return err("User.unsigned_count: " + e); }
-        let write_15_unsigned_count_result = grpc.proto_writer_varint(writer, value.unsigned_count as u64);
-        guard let _write_15_unsigned_count = write_15_unsigned_count_result else let e = err_of(write_15_unsigned_count_result) { return err("User.unsigned_count: " + e); }
+        n = n + 1;
+        n = n + grpc.proto_size_varint(value.unsigned_count as u64);
     }
     if value.unsigned_total != 0 {
-        let tag_16_result = grpc.proto_writer_tag(writer, 16, grpc.PROTO_VARINT);
-        guard let _tag_16 = tag_16_result else let e = err_of(tag_16_result) { return err("User.unsigned_total: " + e); }
-        let write_16_unsigned_total_result = grpc.proto_writer_varint(writer, value.unsigned_total);
-        guard let _write_16_unsigned_total = write_16_unsigned_total_result else let e = err_of(write_16_unsigned_total_result) { return err("User.unsigned_total: " + e); }
+        n = n + 2;
+        n = n + grpc.proto_size_varint(value.unsigned_total);
     }
     if value.signed_delta != 0 {
-        let tag_17_result = grpc.proto_writer_tag(writer, 17, grpc.PROTO_VARINT);
-        guard let _tag_17 = tag_17_result else let e = err_of(tag_17_result) { return err("User.signed_delta: " + e); }
-        if value.signed_delta < -2147483648 || value.signed_delta > 2147483647 { return err("User.signed_delta: value is outside int32 range"); }
-        let write_17_signed_delta_result = grpc.proto_writer_varint(writer, grpc.proto_sint32_to_wire(value.signed_delta));
-        guard let _write_17_signed_delta = write_17_signed_delta_result else let e = err_of(write_17_signed_delta_result) { return err("User.signed_delta: " + e); }
+        n = n + 2;
+        if !grpc.proto_int32_in_range(value.signed_delta) { return -1; }
+        n = n + grpc.proto_size_varint(grpc.proto_sint32_to_wire(value.signed_delta));
     }
     if value.fixed_count != 0 {
-        let tag_18_result = grpc.proto_writer_tag(writer, 18, grpc.PROTO_FIXED32);
-        guard let _tag_18 = tag_18_result else let e = err_of(tag_18_result) { return err("User.fixed_count: " + e); }
-        let write_18_fixed_count_result = grpc.proto_writer_fixed32(writer, value.fixed_count);
-        guard let _write_18_fixed_count = write_18_fixed_count_result else let e = err_of(write_18_fixed_count_result) { return err("User.fixed_count: " + e); }
+        n = n + 2;
+        n = n + 4;
     }
     if value.fixed_total != 0 {
-        let tag_19_result = grpc.proto_writer_tag(writer, 19, grpc.PROTO_FIXED64);
-        guard let _tag_19 = tag_19_result else let e = err_of(tag_19_result) { return err("User.fixed_total: " + e); }
-        let write_19_fixed_total_result = grpc.proto_writer_fixed64(writer, value.fixed_total);
-        guard let _write_19_fixed_total = write_19_fixed_total_result else let e = err_of(write_19_fixed_total_result) { return err("User.fixed_total: " + e); }
+        n = n + 2;
+        n = n + 8;
     }
     if value.signed_fixed != 0 {
-        let tag_20_result = grpc.proto_writer_tag(writer, 20, grpc.PROTO_FIXED32);
-        guard let _tag_20 = tag_20_result else let e = err_of(tag_20_result) { return err("User.signed_fixed: " + e); }
-        if value.signed_fixed < -2147483648 || value.signed_fixed > 2147483647 { return err("User.signed_fixed: value is outside int32 range"); }
-        let write_20_signed_fixed_result = grpc.proto_writer_fixed32(writer, value.signed_fixed as u32);
-        guard let _write_20_signed_fixed = write_20_signed_fixed_result else let e = err_of(write_20_signed_fixed_result) { return err("User.signed_fixed: " + e); }
+        n = n + 2;
+        if !grpc.proto_int32_in_range(value.signed_fixed) { return -1; }
+        n = n + 4;
     }
     if value.signed_fixed_total != 0 {
-        let tag_21_result = grpc.proto_writer_tag(writer, 21, grpc.PROTO_FIXED64);
-        guard let _tag_21 = tag_21_result else let e = err_of(tag_21_result) { return err("User.signed_fixed_total: " + e); }
-        let write_21_signed_fixed_total_result = grpc.proto_writer_fixed64(writer, value.signed_fixed_total as u64);
-        guard let _write_21_signed_fixed_total = write_21_signed_fixed_total_result else let e = err_of(write_21_signed_fixed_total_result) { return err("User.signed_fixed_total: " + e); }
+        n = n + 2;
+        n = n + 8;
     }
-    return ok(grpc.proto_writer_finish(writer));
+    return n;
+}
+
+fn write_User(w: grpc.Writer, value: User) {
+    if value.id != 0 {
+        grpc.proto_write_varint(w, 8);
+        grpc.proto_write_varint(w, grpc.proto_int32_to_wire(value.id));
+    }
+    if value.score != 0 {
+        grpc.proto_write_varint(w, 16);
+        grpc.proto_write_varint(w, grpc.proto_sint64_to_wire(value.score));
+    }
+    if value.name != "" {
+        grpc.proto_write_varint(w, 26);
+        grpc.proto_write_string(w, value.name);
+    }
+    if value.avatar != b"" {
+        grpc.proto_write_varint(w, 34);
+        grpc.proto_write_bytes(w, value.avatar);
+    }
+    if value.active != false {
+        grpc.proto_write_varint(w, 40);
+        grpc.proto_write_bool(w, value.active);
+    }
+    if value.ratio != 0.0 {
+        grpc.proto_write_varint(w, 53);
+        grpc.proto_write_float(w, value.ratio);
+    }
+    if value.balance != 0.0 {
+        grpc.proto_write_varint(w, 57);
+        grpc.proto_write_double(w, value.balance);
+    }
+    if value.color != 0 {
+        grpc.proto_write_varint(w, 64);
+        grpc.proto_write_varint(w, grpc.proto_int32_to_wire(value.color));
+    }
+    if len(value.nums) > 0 {
+        let packed = 0;
+        for item in value.nums {
+            packed = packed + grpc.proto_size_varint(item as u64);
+        }
+        grpc.proto_write_varint(w, 74);
+        grpc.proto_write_varint(w, packed as u64);
+        for item in value.nums {
+            grpc.proto_write_varint(w, item as u64);
+        }
+    }
+    for item in value.old_nums {
+        grpc.proto_write_varint(w, 80);
+        grpc.proto_write_varint(w, grpc.proto_int32_to_wire(item));
+    }
+    if let item = value.address {
+        grpc.proto_write_varint(w, 90);
+        grpc.proto_write_varint(w, size_Address(item) as u64);
+        write_Address(w, item);
+    }
+    if let item = value.nickname {
+        grpc.proto_write_varint(w, 98);
+        grpc.proto_write_string(w, item);
+    }
+    for map_key, map_value in value.labels {
+        let entry = 0;
+        if map_key != "" {
+            entry = entry + 1;
+            entry = entry + grpc.proto_size_delimited(len(map_key));
+        }
+        if map_value != 0 {
+            entry = entry + 1;
+            entry = entry + grpc.proto_size_varint(grpc.proto_int32_to_wire(map_value));
+        }
+        grpc.proto_write_varint(w, 106);
+        grpc.proto_write_varint(w, entry as u64);
+        if map_key != "" {
+            grpc.proto_write_varint(w, 10);
+            grpc.proto_write_string(w, map_key);
+        }
+        if map_value != 0 {
+            grpc.proto_write_varint(w, 16);
+            grpc.proto_write_varint(w, grpc.proto_int32_to_wire(map_value));
+        }
+    }
+    for map_key, map_value in value.offices {
+        let entry = 0;
+        if map_key != 0 {
+            entry = entry + 1;
+            entry = entry + grpc.proto_size_varint(map_key as u64);
+        }
+        entry = entry + 1;
+        let size_14 = size_Address(map_value);
+        entry = entry + grpc.proto_size_delimited(size_14);
+        grpc.proto_write_varint(w, 114);
+        grpc.proto_write_varint(w, entry as u64);
+        if map_key != 0 {
+            grpc.proto_write_varint(w, 8);
+            grpc.proto_write_varint(w, map_key as u64);
+        }
+        grpc.proto_write_varint(w, 18);
+        grpc.proto_write_varint(w, size_Address(map_value) as u64);
+        write_Address(w, map_value);
+    }
+    if value.unsigned_count != 0 {
+        grpc.proto_write_varint(w, 120);
+        grpc.proto_write_varint(w, value.unsigned_count as u64);
+    }
+    if value.unsigned_total != 0 {
+        grpc.proto_write_varint(w, 128);
+        grpc.proto_write_varint(w, value.unsigned_total);
+    }
+    if value.signed_delta != 0 {
+        grpc.proto_write_varint(w, 136);
+        grpc.proto_write_varint(w, grpc.proto_sint32_to_wire(value.signed_delta));
+    }
+    if value.fixed_count != 0 {
+        grpc.proto_write_varint(w, 149);
+        grpc.proto_write_fixed32(w, value.fixed_count);
+    }
+    if value.fixed_total != 0 {
+        grpc.proto_write_varint(w, 153);
+        grpc.proto_write_fixed64(w, value.fixed_total);
+    }
+    if value.signed_fixed != 0 {
+        grpc.proto_write_varint(w, 165);
+        grpc.proto_write_fixed32(w, value.signed_fixed as u32);
+    }
+    if value.signed_fixed_total != 0 {
+        grpc.proto_write_varint(w, 169);
+        grpc.proto_write_fixed64(w, value.signed_fixed_total as u64);
+    }
+}
+
+fn check_User(value: User) -> str {
+    if !grpc.proto_int32_in_range(value.id) { return "User.id: value is outside int32 range"; }
+    if !grpc.proto_int32_in_range(value.color) { return "User.color: value is outside int32 range"; }
+    for item in value.old_nums {
+        if !grpc.proto_int32_in_range(item) { return "User.old_nums: value is outside int32 range"; }
+    }
+    if let item = value.address {
+        let check_11 = check_Address(item);
+        if check_11 != "" { return "User.address: " + check_11; }
+    }
+    for map_key, map_value in value.labels {
+        if !grpc.proto_int32_in_range(map_value) { return "User.labels map value: value is outside int32 range"; }
+    }
+    for map_key, map_value in value.offices {
+        let check_14 = check_Address(map_value);
+        if check_14 != "" { return "User.offices map value: " + check_14; }
+    }
+    if !grpc.proto_int32_in_range(value.signed_delta) { return "User.signed_delta: value is outside int32 range"; }
+    if !grpc.proto_int32_in_range(value.signed_fixed) { return "User.signed_fixed: value is outside int32 range"; }
+    return "";
 }
 
 pub struct Empty {
@@ -555,17 +686,17 @@ pub fn new_Empty() -> Empty {
 fn decode_Empty_reader(reader: grpc.Reader) -> result[Empty, str] {
     let out = new_Empty();
     while true {
-        let tag_result = grpc.proto_reader_tag(reader);
-        guard let tag_opt = tag_result else let e = err_of(tag_result) { return err("protobuf tag: " + e); }
-        guard let tag = tag_opt else { break; }
-        switch tag.field_number {
+        let key_read = grpc.proto_reader_key(reader);
+        guard let key = key_read else let code = err_of(key_read) { return err("Empty: protobuf key: " + grpc.proto_error_text(code)); }
+        if key == 0 { break; }
+        let wire = key & 7;
+        switch key >> 3 {
           default {
-            let skipped = grpc.proto_reader_skip(reader, tag.wire_type);
-            guard let _skip = skipped else let e = err_of(skipped) { return err("unknown protobuf field: " + e); }
+            let skipped = grpc.proto_reader_skip(reader, wire);
+            guard let _skipped = skipped else let code = err_of(skipped) { return err("Empty: unknown protobuf field: " + grpc.proto_error_text(code)); }
           }
         }
     }
-    if !grpc.proto_reader_done(reader) { return err("protobuf submessage was not fully consumed"); }
     return ok(out);
 }
 
@@ -576,9 +707,25 @@ pub fn decode_Empty(raw: bytes, limits: grpc.Limits) -> result[Empty, str] {
 }
 
 pub fn encode_Empty(value: Empty, limits: grpc.Limits) -> result[bytes, str] {
-    let writer_result = grpc.proto_writer(limits);
-    guard let writer = writer_result else let e = err_of(writer_result) { return err(e); }
+    if !grpc.proto_limits_valid(limits) { return err("grpc.proto writer: invalid limits"); }
+    let size = size_Empty(value);
+    if size < 0 { return err(check_Empty(value)); }
+    if size > limits.max_message_bytes { return err("grpc.proto writer: message exceeds configured byte limit"); }
+    let writer = grpc.proto_writer();
+    write_Empty(writer, value);
     return ok(grpc.proto_writer_finish(writer));
+}
+
+fn size_Empty(value: Empty) -> int {
+    let n = 0;
+    return n;
+}
+
+fn write_Empty(w: grpc.Writer, value: Empty) {
+}
+
+fn check_Empty(value: Empty) -> str {
+    return "";
 }
 
 pub let SAMPLE_USERSERVICE_GET_PATH = "/sample.UserService/Get";
