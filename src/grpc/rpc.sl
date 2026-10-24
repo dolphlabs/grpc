@@ -212,20 +212,23 @@ pub fn grpc_timeout_header(timeout_ns: int) -> result[str, str] {
     return err("grpc timeout: duration cannot be represented in eight digits");
 }
 
-pub fn grpc_client_start(reader: http2.Reader, transport: http2.Transport,
+pub fn grpc_client_start(cn: http2.Conn, reader: http2.Reader,
+                         transport: http2.Transport,
                          writer: chan[http2.WMsg], limits: http2.Limits)
                          -> result[bool, str] {
-    return http2.client_preface(reader, transport, writer, limits);
+    return http2.client_preface(cn, reader, transport, writer, limits);
 }
 
-// Send one unary request on an already-started generic HTTP/2 client
-// connection. The caller owns TLS/ALPN setup, the writer task and stream IDs.
-pub fn grpc_unary_call(cn: http2.Conn, reader: http2.Reader,
-                       transport: http2.Transport, writer: chan[http2.WMsg],
-                       stream: int, scheme: str, authority: str, path: str,
-                       metadata: [http2.Header], protobuf: bytes,
-                       limits: GrpcLimits, timeout_ns: int)
-                       -> result[GrpcCallResponse, str] {
+// The HTTP/2 request fields and framed body for one unary call.
+gc struct GrpcPrepared {
+    headers: [http2.Header],
+    body: bytes
+}
+
+fn grpc_prepare(scheme: str, authority: str, path: str,
+                metadata: [http2.Header], protobuf: bytes,
+                limits: GrpcLimits, timeout_ns: int)
+                -> result[GrpcPrepared, str] {
     if limits.max_message_bytes < 1 ||
        limits.max_message_bytes > GRPC_HARD_MAX_MESSAGE_BYTES ||
        timeout_ns <= 0 {
@@ -246,8 +249,24 @@ pub fn grpc_unary_call(cn: http2.Conn, reader: http2.Reader,
         http2.Header { name: "te", value: "trailers" },
         http2.Header { name: "grpc-timeout", value: timeout_value }
     ];
+    return ok(GrpcPrepared { headers: headers + metadata, body: body });
+}
+
+// Send one unary request on an already-started generic HTTP/2 client
+// connection that carries one stream at a time. The caller owns TLS/ALPN
+// setup, the writer task and stream IDs; for concurrent calls on one
+// connection use grpc_call with an http2.Client.
+pub fn grpc_unary_call(cn: http2.Conn, reader: http2.Reader,
+                       transport: http2.Transport, writer: chan[http2.WMsg],
+                       stream: int, scheme: str, authority: str, path: str,
+                       metadata: [http2.Header], protobuf: bytes,
+                       limits: GrpcLimits, timeout_ns: int)
+                       -> result[GrpcCallResponse, str] {
+    let prepared = grpc_prepare(scheme, authority, path, metadata, protobuf,
+                                limits, timeout_ns);
+    guard let req = prepared else let e = err_of(prepared) { return err(e); }
     let request_result = http2.client_request_msg(
-        cn, stream, "POST", scheme, authority, path, headers + metadata, body);
+        cn, stream, "POST", scheme, authority, path, req.headers, req.body);
     guard let request = request_result else let e = err_of(request_result) {
         return err(e);
     }
@@ -258,6 +277,39 @@ pub fn grpc_unary_call(cn: http2.Conn, reader: http2.Reader,
     guard let response = response_result else let e = err_of(response_result) {
         return err(e);
     }
+    return grpc_call_response(response, limits);
+}
+
+// One unary call on a shared http2.Client: safe from any number of tasks,
+// each on its own stream of the same connection, each with its own
+// deadline. Not retried; a transport error can follow the server acting.
+pub fn grpc_call(client: http2.Client, scheme: str, authority: str,
+                 path: str, metadata: [http2.Header], protobuf: bytes,
+                 limits: GrpcLimits, timeout_ns: int)
+                 -> result[GrpcCallResponse, str] {
+    let prepared = grpc_prepare(scheme, authority, path, metadata, protobuf,
+                                limits, timeout_ns);
+    guard let req = prepared else let e = err_of(prepared) { return err(e); }
+    let response_result = http2.client_call(
+        client, "POST", grpc_ascii_lower(scheme), authority, path,
+        req.headers, req.body, timeout_ns, limits.max_message_bytes + 5);
+    guard let response = response_result else let e = err_of(response_result) {
+        if e == "timeout" {
+            return ok(GrpcCallResponse {
+                status: GrpcStatus { code: GRPC_STATUS_DEADLINE_EXCEEDED,
+                                     message: "deadline exceeded" },
+                message: none
+            });
+        }
+        return err(e);
+    }
+    return grpc_call_response(response, limits);
+}
+
+// A gRPC unary response: HTTP 200, one gRPC content type, a grpc-status
+// trailer, and at most one length-prefixed message.
+fn grpc_call_response(response: http2.Response, limits: GrpcLimits)
+                      -> result[GrpcCallResponse, str] {
     if response.status != "200" {
         return err("grpc call: HTTP status was " + response.status);
     }
@@ -272,7 +324,13 @@ pub fn grpc_unary_call(cn: http2.Conn, reader: http2.Reader,
     if content_type_count != 1 || !grpc_is_content_type(content_type) {
         return err("grpc call: response content-type must be application/grpc");
     }
-    let status_result = grpc_status_from_trailers(response.trailers);
+    // A trailers-only response (an error status with no message) carries
+    // grpc-status in its one header block instead of in trailers.
+    let status_source = response.trailers;
+    if len(status_source) == 0 {
+        status_source = response.headers;
+    }
+    let status_result = grpc_status_from_trailers(status_source);
     guard let status = status_result else let e = err_of(status_result) {
         return err(e);
     }
@@ -351,8 +409,7 @@ pub fn grpc_response_msg(stream: int, protobuf: bytes, limits: GrpcLimits,
             name: "grpc-message", value: encoding.url_encode(message)
         }];
     }
-    return ok(http2.response_trailers_msg(stream, "200", initial, body,
-                                          trailers));
+    return http2.response_trailers_msg(stream, "200", initial, body, trailers);
 }
 
 fn grpc_is_content_type(value: str) -> bool {

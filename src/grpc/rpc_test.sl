@@ -127,7 +127,8 @@ fn test_grpc_status_trailers_and_response_message() {
     let limits = grpc_default_limits();
     let response = grpc_response_msg(1, b"ok", limits, GRPC_STATUS_OK, "");
     guard let msg = response else let e = err_of(response) { panic(e); }
-    assert(msg.kind == http2.W_TRAILERS, "response closes with gRPC trailers");
+    assert(msg.kind == http2.W_BODY && len(msg.tail) > 0,
+           "response closes with gRPC trailers");
     let body = grpc_parse_message(msg.body, limits);
     guard let envelope = body else let e = err_of(body) { panic(e); }
     assert(grpc_message_bytes(envelope) == b"ok", "response has framed protobuf");

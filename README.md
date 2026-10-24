@@ -62,7 +62,7 @@ let writer: chan[http2.WMsg] = make_chan(16);
 let h2_limits = http2.default_limits();
 spawn http2.writer_task(transport, writer, h2_limits.write);
 guard let _started = grpc.grpc_client_start(
-        reader, transport, writer, h2_limits) else { return; }
+        conn, reader, transport, writer, h2_limits) else { return; }
 
 let wire = encode_User(user, grpc.proto_default_limits());
 guard let protobuf = wire else { return; }
@@ -88,6 +88,29 @@ it at a time. Stream IDs must be odd and increase on a connection. The
 package does not retry calls; a transport error can happen after the server
 has already performed the operation. Reuse a live HTTP/2 connection only
 when the application controls those stream and reader rules.
+
+## Concurrent calls on one connection
+
+`grpc_unary_call` above carries one stream at a time. For many calls at
+once, start an `http2.Client` on the connection and call `grpc_call` from
+as many tasks as you like: each call is its own HTTP/2 stream with its own
+deadline, the client respects the server's concurrent-stream limit, and a
+call past its deadline is cancelled (RST_STREAM) and answers
+`DEADLINE_EXCEEDED`:
+
+```slang
+let started = http2.client_start(http2.transport_tls(ssl), http2.default_limits());
+guard let client = started else let e = err_of(started) { return; }
+let r = grpc.grpc_call(client, "https", "api.example:443",
+                       SAMPLE_USERSERVICE_GET_PATH, [], protobuf,
+                       grpc.grpc_default_limits(), 2000000000);
+guard let call = r else let e = err_of(r) { return; }
+http2.client_close(client);
+```
+
+`tests/interop/client.sl` runs ten such calls at once against Go's
+`net/http` HTTP/2 server over TLS. A trailers-only response (an error
+status with no message, in one header block) is read the same way.
 
 ## Server helpers
 
