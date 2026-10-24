@@ -1,6 +1,7 @@
 # gRPC codec performance PRD
 
-Status: generated codec optimization implemented and locally measured.
+Status: superseded by the zero-allocation codec (see "Follow-up" below);
+the design section describes the 2026-10-11 codec.
 Date: 2026-10-11
 
 ## Problem
@@ -74,3 +75,29 @@ and allocation costs. Peak RSS and real RPC throughput remain unmeasured.
 
 No wire format or generated public message API changes, no reflection, no
 unbounded input, and no parity claim from codec-only measurements.
+
+## Follow-up: zero-allocation codec (2026-10-24)
+
+The `*_fast` primitives, their request-local error state and the packed
+temporary writer are replaced by one design: reader primitives return
+`result[T, int]` error codes (a result with no GC-pointer payload is a plain
+value, so a successful read allocates nothing), one `Reader` is narrowed for
+nested messages, packed fields and map entries, and encoders run a pure
+`size_<M>` pass, then a `write_<M>` pass into one builder, with `check_<M>`
+naming a failing field only after `size_<M>` reports one. Sizing is
+recomputed once per nesting level.
+
+Same 139-byte consumer fixture, same laptop and compiler (slangc 0.2.3),
+`bench/codec/run.sh`:
+
+| Codec | Encode | Decode |
+|---|---:|---:|
+| 2026-10-11 (`_fast` primitives) | 9.6 us, 22 allocations | 8.1 us, 31 allocations |
+| zero-allocation codec | 6.8 us, 15 allocations | 5.3 us, 33 allocations |
+| Go google.golang.org/protobuf v1.36.12 | 1.3 us, 7 allocations | 1.45 us, 19 allocations |
+
+Encoded bytes are byte-identical to Go's `proto.Marshal`
+(`bench/codec/compare-go.sh`). `tests/run.sh` enforces 16 and 34
+allocations. The consumer keeps this PRD's size and default-valued map
+checks. With slang's perf/cache-current-task (dev, 2026-10-24) the same
+codec measured 4.7 us encode and 4.0 us decode.
