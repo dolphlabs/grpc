@@ -332,3 +332,25 @@ fn test_grpc_proto_signed_varints() {
     let e = grpc_proto_test_signed_varints();
     if e != "" { panic(e); }
 }
+
+// Packed elements are charged against the same value budget as keys, so a
+// packed field cannot smuggle more values than the limit allows.
+fn grpc_proto_test_packed_budget() -> str {
+    let limits_result = proto_new_limits(32, 4, 2);
+    guard let limits = limits_result else let e = err_of(limits_result) { return e; }
+    let made = proto_reader(b"\x0a\x03\x01\x02\x03", limits);
+    guard let reader = made else let e = err_of(made) { return e; }
+    let k = proto_reader_key(reader);
+    guard let _k = k else let code = err_of(k) { return proto_error_text(code); }
+    let entered = proto_reader_enter_packed(reader);
+    guard let _outer = entered else let code = err_of(entered) { return proto_error_text(code); }
+    grpc_proto_expect(grpc_proto_code_of(proto_reader_charge(reader)) == 0, "second value fits");
+    grpc_proto_expect(grpc_proto_code_of(proto_reader_charge(reader)) == PROTO_ERR_VALUES,
+                      "packed value beyond the budget accepted");
+    return "";
+}
+
+fn test_grpc_proto_packed_budget() {
+    let e = grpc_proto_test_packed_budget();
+    if e != "" { panic(e); }
+}

@@ -104,6 +104,18 @@ length, metadata bounds and the five-byte uncompressed message envelope.
 Use the ordinary HTTP/2 server deadlines and request-body cap as well; the
 gRPC package does not own sockets or scheduling.
 
+## Codec performance
+
+Generated codecs decode nested messages and map entries in place, and encode
+nested values directly into the parent writer. In a local one-worker CPU
+microbenchmark of a 1,866-byte `User` round trip, slang measured 16,056 ops/s,
+60 µs p50 and 129 µs p99; Go's protobuf implementation measured 148,933 ops/s,
+5.96 µs p50 and 23.37 µs p99. The optimized codec allocates about 12.7 KB and
+69 GC objects per operation, down from 68.3 KB and 862 objects in the original
+implementation. It remains slower than Go, and these figures do not measure a
+server, HTTP/2, TLS or peak RSS. The method and A/B results are in
+[GRPC_PERFORMANCE_PRD.md](GRPC_PERFORMANCE_PRD.md).
+
 ## Limits and errors
 
 Default maximum message size is 4 MiB; the hard maximum is 64 MiB. The
