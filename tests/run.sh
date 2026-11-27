@@ -7,8 +7,7 @@ run_dir=$(mktemp -d "${TMPDIR:-/tmp}/grpc-test.XXXXXX")
 server_pid=
 trap 'kill "${server_pid:-}" 2>/dev/null || true; rm -rf "$run_dir"' EXIT HUP INT TERM
 
-(cd "$repo/cmd/protoc-gen-slang" && go test ./... && go vet ./... &&
-    go build -o "$run_dir/protoc-gen-slang" .)
+("$slangc" test "$repo/cmd/protoc-gen-slang" -v && "$slangc" "$repo/cmd/protoc-gen-slang/main.sl" -o "$run_dir/protoc-gen-slang")
 mkdir "$run_dir/generated"
 (cd "$repo/tests/proto" && protoc \
     --plugin=protoc-gen-slang="$run_dir/protoc-gen-slang" \

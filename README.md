@@ -1,19 +1,19 @@
 # grpc
 
 `grpc` is a standalone unary gRPC package for slang. It provides bounded
-Protocol Buffers wire codecs, gRPC message and metadata handling, a Go
-`protoc-gen-slang` generator, and unary calls over slang's protocol-neutral
+Protocol Buffers wire codecs, gRPC message and metadata handling, a standalone
+`protoc-gen-slang` generator written in slang, and unary calls over slang's protocol-neutral
 HTTP/2 client. Generated messages are ordinary slang structs; runtime
 encoding uses direct field-number switches and has no reflection or dynamic
 message tree.
 
 ## Generate typed messages
 
-Build the generator with Go and `protoc`, then generate the slang source next
+Build the generator with `slangc` and run `protoc`, then generate the slang source next
 to the application's `.proto` files:
 
 ```sh
-go build -o ./bin/protoc-gen-slang ./cmd/protoc-gen-slang
+slangc cmd/protoc-gen-slang/main.sl -o ./bin/protoc-gen-slang
 protoc --plugin=protoc-gen-slang=./bin/protoc-gen-slang \
   --proto_path=proto --slang_out=src/generated proto/user.proto
 ```
@@ -38,7 +38,7 @@ The generator emits `new_<Message>`, `encode_<Message>`, and
 `decode_<Message>` for each message, named integer constants for enum values,
 and `<SERVICE>_<METHOD>_PATH` constants for unary RPCs. Codec functions
 return `result` and take explicit protobuf limits. Keep generated source in
-the application repository so builds do not need `protoc` or Go.
+the application repository so builds do not need `protoc`.
 
 V1 supports proto3 scalar numbers, booleans, strings and bytes; nested
 messages; enums; optional presence; repeated and packed fields; maps; and
@@ -169,13 +169,13 @@ times; generated structs carry no size cache.
 ## Package layout
 
 - `src/grpc`: slang runtime package and focused unit tests.
-- `cmd/protoc-gen-slang`: standalone Go generator, excluded from package
+- `cmd/protoc-gen-slang`: standalone generator written in slang, excluded from package
   downloads.
 - `tests`: generator fixtures, generated consumer, and independent Go TLS /
   HTTP/2 interoperability server; excluded from package downloads.
 - `bench`: benchmark programs; excluded from package downloads.
 
-Run `sh tests/run.sh` for Go generator checks, deterministic fixture
+Run `sh tests/run.sh` for generator checks, deterministic fixture
 generation, generated-code compilation, codec cases, and the Go TLS/ALPN
 HTTP/2 unary interoperability test. Run slang package tests with
 `slangc test src/grpc -v`.
